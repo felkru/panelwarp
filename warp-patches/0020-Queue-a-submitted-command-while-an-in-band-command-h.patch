@@ -1,7 +1,7 @@
 From 206f2f9ba874050b1e4c5d0980a8154915423bb5 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 17:56:25 -0700
-Subject: [PATCH 20/49] Queue a submitted command while an in-band command
+Subject: [PATCH 20/50] Queue a submitted command while an in-band command
  holds the shell
 
 Enter was silently dropped when a completions generator (an in-band

@@ -1,7 +1,7 @@
 From 8a8339ef5830d3854556ead35d5b2db4e9796cf6 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 16:05:13 -0700
-Subject: [PATCH 47/49] SSH Warpify on the web
+Subject: [PATCH 47/50] SSH Warpify on the web
 
 The host's shell runs on the user's machine, so the init line now sets the env the
 desktop PTY gets (WARP_IS_LOCAL_SHELL_SESSION, WARP_USE_SSH_WRAPPER from the Warpify

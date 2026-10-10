@@ -1,7 +1,7 @@
 From 3acef418304ef21d208dcdcf0735229d668e5c47 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 13:33:29 -0700
-Subject: [PATCH 04/49] embedded: memory stats off, vertical tabs on by default
+Subject: [PATCH 04/50] embedded: memory stats off, vertical tabs on by default
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---

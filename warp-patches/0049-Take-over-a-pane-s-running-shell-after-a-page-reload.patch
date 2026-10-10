@@ -1,7 +1,7 @@
 From bd2b012a466bb54c2da02f925b1ceb49252f8742 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Fri, 9 Oct 2026 16:11:56 -0700
-Subject: [PATCH 49/49] Take over a pane's running shell after a page reload
+Subject: [PATCH 49/50] Take over a pane's running shell after a page reload
 
 The page asks the PTY server for its pane's shell (`pane=` on the new-session URL). When the
 server still has that shell running, it replies with `adopt` (the shell's Warp session ids and

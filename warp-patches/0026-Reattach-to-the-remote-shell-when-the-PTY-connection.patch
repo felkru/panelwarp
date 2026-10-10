@@ -1,7 +1,7 @@
 From 6631b221c117f3d4c901a5e2087a48fb9899be09 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 21:58:39 -0700
-Subject: [PATCH 26/49] Reattach to the remote shell when the PTY connection
+Subject: [PATCH 26/50] Reattach to the remote shell when the PTY connection
  drops
 
 Browsers close WebSockets on sleep and network changes, which left the panel

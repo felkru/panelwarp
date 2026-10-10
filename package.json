@@ -2,7 +2,7 @@
   "name": "panelwarp",
   "displayName": "Panelwarp",
   "description": "An unofficial fork of the open-source Warp terminal, running in a VS Code panel tab next to Terminal: blocks, command search, completions and BYOK AI. Not affiliated with Warp.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "felixkrueckel",
   "icon": "media/icon.png",
   "repository": {

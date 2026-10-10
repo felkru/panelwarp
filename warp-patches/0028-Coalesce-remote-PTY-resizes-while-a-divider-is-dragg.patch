@@ -1,7 +1,7 @@
 From 2e642b4c0bfc3c8f346e8a76c6ce297952f440ba Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 01:10:02 -0700
-Subject: [PATCH 28/49] Coalesce remote PTY resizes while a divider is dragged
+Subject: [PATCH 28/50] Coalesce remote PTY resizes while a divider is dragged
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---

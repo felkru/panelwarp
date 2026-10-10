@@ -1,7 +1,7 @@
 From 488d0800ce3c4b34fca1e86aab0dd120c32b2d26 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 15:19:17 -0700
-Subject: [PATCH 15/49] Hide the AI sign-up header in embedded builds; space
+Subject: [PATCH 15/50] Hide the AI sign-up header in embedded builds; space
  the AI provider rows
 
 Embedded (remote_tty) builds have no Warp accounts, so the Warp Agent page no

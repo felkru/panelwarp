@@ -1,7 +1,7 @@
 From 5181e8238508ec93c1ef39561180ea9ccbff9a85 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 13:33:29 -0700
-Subject: [PATCH 02/49] embedded: skip Warp sign-in and the desktop-download
+Subject: [PATCH 02/50] embedded: skip Warp sign-in and the desktop-download
  dialog
 
 remote_tty builds run inside a host app without Warp accounts.

@@ -1,0 +1,64 @@
+From 3df6258ff7e4ad4d14329ccaf352116252091aaa Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Sat, 10 Oct 2026 01:01:05 -0700
+Subject: [PATCH 50/50] Close a tab when its shell exits in embedded builds
+
+The web event loop now ends the terminal model when the PTY host reports the shell exited, as
+desktop does for a local shell, so `exit` closes the pane. The embedded app has no window to
+close, so when the last tab's shell exits a new tab takes its place.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/terminal/remote_tty/event_loop.rs |  3 +++
+ app/src/workspace/view.rs                 | 17 +++++++++++++++++
+ 2 files changed, 20 insertions(+)
+
+diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
+index a10c501..0622f21 100644
+--- a/app/src/terminal/remote_tty/event_loop.rs
++++ b/app/src/terminal/remote_tty/event_loop.rs
+@@ -19,6 +19,7 @@ use crate::terminal::bootstrap::init_shell_script_for_shell;
+ use crate::terminal::event_listener::ChannelEventListener;
+ use crate::terminal::model::ansi::Processor;
+ use crate::terminal::model::session::SessionId;
++use crate::terminal::model::terminal_model::ExitReason;
+ use crate::settings::SshSettings;
+ use crate::terminal::session_settings::SessionSettings;
+ use crate::terminal::warpify::settings::WarpifySettings;
+@@ -493,6 +494,8 @@ impl EventLoop {
+             Ok(HostControl::Exited(code)) => {
+                 log::info!("Remote shell exited with code {code}");
+                 self.shell_exited = true;
++                // As on desktop: the pane closes (or shows the exit banner) once its shell ends.
++                self.terminal_model.lock().exit(ExitReason::ShellProcessExited);
+             }
+             Ok(HostControl::PasswordPrompt) => ctx.emit(EventLoopEvent::PossiblePasswordPrompt),
+             Err(_) => report_error!("Received unknown text message from the PTY host"),
+diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
+index 67c138e..1300991 100644
+--- a/app/src/workspace/view.rs
++++ b/app/src/workspace/view.rs
+@@ -16296,6 +16296,23 @@ impl Workspace {
+                 }
+             }
+             pane_group::Event::Exited { add_to_undo_stack } => {
++                // The embedded app has no window to close, so a last tab whose shell exited
++                // would stay as a dead tab: start a new tab in its place first.
++                if cfg!(feature = "remote_tty")
++                    && self.tabs.len() == 1
++                    && self.tabs[0].pane_group.id() == pane_group.id()
++                {
++                    let window_id = ctx.window_id();
++                    self.add_new_session_tab_internal_with_default_session_mode_behavior(
++                        NewSessionSource::Tab,
++                        Some(window_id),
++                        None,
++                        None,
++                        false, /* hide_homepage */
++                        DefaultSessionModeBehavior::Ignore,
++                        ctx,
++                    );
++                }
+                 let tab = self.tabs.iter().position(|t| {
+                     t.pane_group.id() == pane_group.id()
+                         && t.pane_group.window_id(ctx) == pane_group.window_id(ctx)

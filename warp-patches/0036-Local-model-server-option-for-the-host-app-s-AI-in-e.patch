@@ -1,7 +1,7 @@
 From 2cf0442c4621586f79cb9c39887f895aa0c879fc Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 02:46:18 -0700
-Subject: [PATCH 36/49] Local model server option for the host app's AI in
+Subject: [PATCH 36/50] Local model server option for the host app's AI in
  embedded builds
 
 Adds `host.ai.local_model` (empty by default) and `host.ai.local_server` (LM Studio's

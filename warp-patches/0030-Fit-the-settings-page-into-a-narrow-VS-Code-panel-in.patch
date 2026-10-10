@@ -1,7 +1,7 @@
 From 3a41f2216dabafec97392871ce1f74f1147af972 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 01:33:13 -0700
-Subject: [PATCH 30/49] Fit the settings page into a narrow VS Code panel in
+Subject: [PATCH 30/50] Fit the settings page into a narrow VS Code panel in
  embedded builds
 
 In the panel (~780 px wide) the page's 520 px minimum width pushed every row
