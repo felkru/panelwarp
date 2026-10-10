@@ -1,0 +1,19 @@
+steps:
+- id: x64
+  name: rockylinux:8
+  entrypoint: bash
+  args: ['-c', 'ln -s /workspace /src && /workspace/build.sh x64']
+- id: binfmt
+  name: gcr.io/cloud-builders/docker
+  waitFor: ['-']
+  args: ['run', '--privileged', '--rm', 'tonistiigi/binfmt', '--install', 'arm64']
+- id: arm64
+  name: gcr.io/cloud-builders/docker
+  waitFor: ['binfmt']
+  args: ['run', '--rm', '--platform', 'linux/arm64', '-v', '/workspace:/src', 'rockylinux:8', 'bash', '/src/build.sh', 'arm64']
+- id: upload
+  name: gcr.io/cloud-builders/gsutil
+  args: ['-m', 'cp', '-r', '/workspace/out', 'gs://$_BUCKET/']
+timeout: 3600s
+options:
+  machineType: E2_HIGHCPU_8

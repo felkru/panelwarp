@@ -23,7 +23,8 @@ Open the **Panelwarp** tab in the bottom panel (View → Open View… → Panelw
 actions that collide with VS Code shortcuts are in the Command Palette under "Panelwarp: …". To
 use AI features, run **Panelwarp: Set OpenRouter API Key**.
 
-Platforms: macOS (Apple silicon and Intel). Windows and Linux are planned.
+Platforms: macOS (Apple silicon and Intel) and Linux (x64, arm64; also in Remote SSH, WSL and
+container windows). Windows is planned.
 
 ## Source and license
 

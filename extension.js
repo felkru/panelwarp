@@ -82,6 +82,14 @@ const STORAGE_KEY = 'warp.localStorage';
 const HISTORY_SYNC_KEY = 'warp.historySync';
 const STATIC_PORT_KEY = 'warp.staticPort';
 
+/** `url` as the webview can reach it (see vscode.env.asExternalUri; ws URLs map like http). */
+async function externalUrl(url) {
+  const ws = /^wss?:/.test(url);
+  const uri = await vscode.env.asExternalUri(vscode.Uri.parse(ws ? url.replace(/^ws/, 'http') : url));
+  const mapped = uri.toString(true);
+  return ws ? mapped.replace(/^http/, 'ws') : mapped;
+}
+
 class WarpViewProvider {
   constructor(globalState, storageDir, log) {
     this.globalState = globalState;
@@ -115,10 +123,13 @@ class WarpViewProvider {
       shell_path: launch.file,
       default_cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || os.homedir(),
     });
+    // In a remote window (SSH, WSL, containers) the PTY host runs on the remote machine and VS
+    // Code forwards its ports to the webview; locally the URLs stay as they are.
+    const pageUrl = await externalUrl(host.pageUrl);
     this.server = {
-      pageUrl: host.pageUrl,
-      staticOrigin: host.staticOrigin,
-      ptyUrl: `${host.ptyBaseUrl}&${params}`,
+      pageUrl,
+      staticOrigin: new URL(pageUrl).origin,
+      ptyUrl: `${await externalUrl(host.ptyBaseUrl)}&${params}`,
       wasmEtag: () => wasmEtag(bundleDir),
     };
     this.log.appendLine(`PTY host ${host.pid} serves ${bundleDir} at ${host.pageUrl}`);

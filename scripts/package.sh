@@ -12,7 +12,8 @@
 #     onboarding and sign-in slide images, which embedded builds never show
 #   - the wasm and the fallback fonts ship brotli-compressed as <file>.br; server.js
 #     serves them with Content-Encoding: br, and precompressed.json lists their decoded sizes
-# Linux targets need node-pty built on Linux.
+# Linux targets need node-pty built on Linux (prebuilds/linux-<arch>/pty.node; built on Rocky
+# Linux 8, glibc 2.28, as VS Code requires).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TARGET="${1:-darwin-arm64}"
@@ -24,7 +25,7 @@ PREBUILDS=node_modules/node-pty/prebuilds
 [ -f "$SRC/wasm/warp.js" ] || { echo "no Warp bundle at $SRC"; exit 2; }
 
 "$PWD/scripts/export-warp-patches.sh" >/dev/null
-OUT="$PWD/warp-panel-$TARGET.vsix"
+OUT="$PWD/panelwarp-$TARGET.vsix"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE" "$STAGE.extension.js" "$STAGE.daemon.js"' EXIT
 
