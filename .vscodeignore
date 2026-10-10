@@ -10,3 +10,4 @@ node_modules/node-pty/src/**
 node_modules/node-pty/deps/**
 node_modules/node-pty/scripts/**
 node_modules/node-pty/typings/**
+media/icon.svg
