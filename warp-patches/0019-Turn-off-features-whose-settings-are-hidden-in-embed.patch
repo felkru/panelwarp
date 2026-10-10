@@ -1,0 +1,116 @@
+From 3c21b17abdbaa6afcd7ee4f37197cd961bfa673d Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 17:41:24 -0700
+Subject: [PATCH 19/49] Turn off features whose settings are hidden in embedded
+ builds
+
+Under remote_tty: no Warp AI (is_any_ai_enabled), no autoupdate,
+changelog, crash reporting, usage events or CLI agent rich input, no
+codebase outlining for @ context, and a new embedded ContextFlag set
+that disables update prompts, the network log, the reward modal, the
+forced side panel, Warp Essentials and MCP servers.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/features.rs                  | 16 ++++++++++++++++
+ app/src/settings/ai.rs               |  4 +++-
+ app/src/uri/web_intent_parser.rs     |  3 +++
+ app/src/workspace/view.rs            |  7 ++++---
+ crates/warp_core/src/context_flag.rs | 11 +++++++++++
+ 5 files changed, 37 insertions(+), 4 deletions(-)
+
+diff --git a/app/src/features.rs b/app/src/features.rs
+index 9bea598..64bf9c6 100644
+--- a/app/src/features.rs
++++ b/app/src/features.rs
+@@ -531,5 +531,21 @@ fn enabled_features() -> HashSet<FeatureFlag> {
+         FeatureFlag::StoredScreenshots,
+     ]);
+ 
++    // Embedded builds have no updates, changelog, crash reporting or usage events, and no CLI
++    // agent rich input (its settings are hidden there).
++    #[cfg(feature = "remote_tty")]
++    flags.retain(|flag| {
++        !matches!(
++            flag,
++            FeatureFlag::Autoupdate
++                | FeatureFlag::Changelog
++                | FeatureFlag::CrashReporting
++                | FeatureFlag::CocoaSentry
++                | FeatureFlag::LogExpensiveFramesInSentry
++                | FeatureFlag::RecordAppActiveEvents
++                | FeatureFlag::CLIAgentRichInput
++        )
++    });
++
+     flags
+ }
+diff --git a/app/src/settings/ai.rs b/app/src/settings/ai.rs
+index e0381ad..d8eef0e 100644
+--- a/app/src/settings/ai.rs
++++ b/app/src/settings/ai.rs
+@@ -2275,7 +2275,9 @@ impl AISettings {
+             .get()
+             .is_anonymous_or_logged_out();
+ 
+-        *self.is_any_ai_enabled
++        // Embedded (`remote_tty`) builds have no Warp AI; `#` uses the host's provider instead.
++        !cfg!(feature = "remote_tty")
++            && *self.is_any_ai_enabled
+             && !is_anonymous_or_logged_out
+             && !self.is_ai_disabled_due_to_remote_session_org_policy(app)
+     }
+diff --git a/app/src/uri/web_intent_parser.rs b/app/src/uri/web_intent_parser.rs
+index ab93663..4f776aa 100644
+--- a/app/src/uri/web_intent_parser.rs
++++ b/app/src/uri/web_intent_parser.rs
+@@ -246,6 +246,9 @@ pub fn parse_web_intent_from_current_url() -> Option<Url> {
+ 
+ #[cfg(target_family = "wasm")]
+ pub fn set_context_flags_from_current_url() {
++    #[cfg(feature = "remote_tty")]
++    ContextFlag::set_embedded_only();
++
+     let Some(current_url) = parse_current_url() else {
+         log::warn!("Unable to parse the current url");
+         return;
+diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
+index 0b22e8b..d1b2931 100644
+--- a/app/src/workspace/view.rs
++++ b/app/src/workspace/view.rs
+@@ -23714,9 +23714,10 @@ impl Workspace {
+                 .insert(flags::AI_COMMAND_SEARCH_HASH_TRIGGER_FLAG);
+         }
+ 
+-        if *input_settings
+-            .outline_codebase_symbols_for_at_context_menu
+-            .value()
++        if !cfg!(feature = "remote_tty")
++            && *input_settings
++                .outline_codebase_symbols_for_at_context_menu
++                .value()
+         {
+             context
+                 .set
+diff --git a/crates/warp_core/src/context_flag.rs b/crates/warp_core/src/context_flag.rs
+index dbcfb80..fa394c3 100644
+--- a/crates/warp_core/src/context_flag.rs
++++ b/crates/warp_core/src/context_flag.rs
+@@ -103,6 +103,17 @@ impl ContextFlag {
+         disable_flag(Self::ShowMCPServers);
+     }
+ 
++    /// Embedded in a host app (the VS Code panel, `remote_tty`): no update prompts, network log,
++    /// reward modal, forced side panel, Warp Essentials or MCP servers.
++    pub fn set_embedded_only() {
++        disable_flag(Self::ForceSidePanelOpen);
++        disable_flag(Self::ShowRewardModal);
++        disable_flag(Self::PromptForVersionUpdates);
++        disable_flag(Self::NetworkLogConsole);
++        disable_flag(Self::WarpEssentials);
++        disable_flag(Self::ShowMCPServers);
++    }
++
+     // ContextFlag flag sets:
+     pub fn set_shared_session_only() {
+         disable_flag(Self::CreateSharedSession);

@@ -1,0 +1,29 @@
+From b395ebfd885e369b8c7651909f84be9dab198dae Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 14:58:42 -0700
+Subject: [PATCH 39/49] Keep Warp's in-band commands out of fish history
+
+Warp starts in-band commands in fish with a space, relying on fish leaving such commands out of
+history. Defining fish_should_add_to_history (which the bootstrap does) turns that rule off, so
+every ` warp_run_generator_command ...` landed in fish_history. The bootstrap's function now
+applies the rule itself.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/assets/bundled/bootstrap/fish.sh | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/app/assets/bundled/bootstrap/fish.sh b/app/assets/bundled/bootstrap/fish.sh
+index 4f323a9..a96d9e0 100644
+--- a/app/assets/bundled/bootstrap/fish.sh
++++ b/app/assets/bundled/bootstrap/fish.sh
+@@ -660,6 +660,9 @@ else if not functions -q warp_original_fish_should_add_to_history
+   end
+ end
+ function fish_should_add_to_history
++  # Defining this function turns off fish's own rule of leaving out commands that start with a
++  # space, which keeps Warp's in-band commands (` warp_run_generator_command ...`) out of history.
++  string match --quiet -- ' *' $argv[1]; and return 1
+   string match --quiet -- '*warp_run_external_ctrl_r_widget*' $argv[1]; and return 1
+   string match --quiet -- '*warp_run_external_ctrl_t_widget*' $argv[1]; and return 1
+   string match --quiet -- '*warp_run_external_alt_c_widget*' $argv[1]; and return 1

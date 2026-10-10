@@ -1,0 +1,139 @@
+From 488d0800ce3c4b34fca1e86aab0dd120c32b2d26 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 15:19:17 -0700
+Subject: [PATCH 15/49] Hide the AI sign-up header in embedded builds; space
+ the AI provider rows
+
+Embedded (remote_tty) builds have no Warp accounts, so the Warp Agent page no
+longer shows "To use AI features, please create an account." with a Sign up
+button (nor the global AI toggle in its place).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/settings_view/warp_agent_page.rs | 47 ++++++++++++++++--------
+ 1 file changed, 31 insertions(+), 16 deletions(-)
+
+diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
+index 106c7b9..8f92d4b 100644
+--- a/app/src/settings_view/warp_agent_page.rs
++++ b/app/src/settings_view/warp_agent_page.rs
+@@ -3334,8 +3334,10 @@ fn render_global_ai_toggle(
+         );
+     }
+ 
+-    // Show sign-up button for anonymous users, toggle for logged-in users
+-    if is_anonymous {
++    // Show sign-up button for anonymous users, toggle for logged-in users. Embedded
++    // (`remote_tty`) builds have no Warp accounts: AI runs on the host's own provider instead.
++    if cfg!(feature = "remote_tty") {
++    } else if is_anonymous {
+         row.add_child(
+             Flex::row()
+                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
+@@ -7076,15 +7078,26 @@ impl SettingsWidget for HostApiKeyWidget {
+             .with_style(editor_style)
+             .build()
+             .finish();
+-        Flex::column()
+-            .with_spacing(8.)
+-            .with_child(label)
+-            .with_child(description)
+-            .with_child(input)
+-            .finish()
++        host_setting_row(
++            Flex::column()
++                .with_spacing(8.)
++                .with_child(label)
++                .with_child(description)
++                .with_child(input)
++                .finish(),
++        )
+     }
+ }
+ 
++/// Space below each row of the embedded-build AI provider settings.
++const HOST_SETTING_ROW_MARGIN: f32 = 20.;
++
++fn host_setting_row(element: Box<dyn Element>) -> Box<dyn Element> {
++    Container::new(element)
++        .with_margin_bottom(HOST_SETTING_ROW_MARGIN)
++        .finish()
++}
++
+ fn host_settings_editor(
+     text: &str,
+     placeholder: &str,
+@@ -7120,7 +7133,7 @@ fn render_host_setting_column(
+     appearance: &Appearance,
+     app: &AppContext,
+ ) -> Box<dyn Element> {
+-    Flex::column()
++    let column = Flex::column()
+         .with_spacing(8.)
+         .with_child(
+             Text::new_inline(label.to_owned(), appearance.ui_font_family(), CONTENT_FONT_SIZE)
+@@ -7133,7 +7146,8 @@ fn render_host_setting_column(
+                 .finish(),
+         )
+         .with_child(control)
+-        .finish()
++        .finish();
++    host_setting_row(column)
+ }
+ 
+ #[derive(Clone, Copy)]
+@@ -7254,7 +7268,7 @@ impl SettingsWidget for HostAiEffortWidget {
+     }
+ 
+     fn render(&self, view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
+-        render_dropdown_item(
++        host_setting_row(render_dropdown_item(
+             appearance,
+             "Expanded model effort",
+             Some("Reasoning effort for the expanded model. Higher can mean slower suggestions."),
+@@ -7267,7 +7281,7 @@ impl SettingsWidget for HostAiEffortWidget {
+             ),
+             None,
+             &self.dropdown,
+-        )
++        ))
+     }
+ }
+ 
+@@ -7294,7 +7308,7 @@ impl SettingsWidget for HostAiPrivateRoutingWidget {
+             &view.local_only_icon_tooltip_states,
+             app,
+         );
+-        Flex::column()
++        let column = Flex::column()
+             .with_spacing(4.)
+             .with_child(toggle)
+             .with_child(
+@@ -7307,7 +7321,8 @@ impl SettingsWidget for HostAiPrivateRoutingWidget {
+                 .with_color(styles::description_font_color(true, app).into())
+                 .finish(),
+             )
+-            .finish()
++            .finish();
++        host_setting_row(column)
+     }
+ }
+ 
+@@ -7354,7 +7369,7 @@ impl SettingsWidget for HostAiRecentCommandsWidget {
+ 
+     fn render(&self, view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
+         let private_routing = *HostAiSettings::as_ref(app).private_routing;
+-        render_dropdown_item(
++        host_setting_row(render_dropdown_item(
+             appearance,
+             "Recent commands in # requests",
+             Some(if private_routing {
+@@ -7372,7 +7387,7 @@ impl SettingsWidget for HostAiRecentCommandsWidget {
+             ),
+             (!private_routing).then(|| appearance.theme().disabled_ui_text_color()),
+             &self.dropdown,
+-        )
++        ))
+     }
+ }
+ 

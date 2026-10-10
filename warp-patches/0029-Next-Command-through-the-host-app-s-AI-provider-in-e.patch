@@ -1,0 +1,230 @@
+From 547a723795207913ee9876f6e49a08996f1e85c1 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 01:30:24 -0700
+Subject: [PATCH 29/49] Next Command through the host app's AI provider in
+ embedded builds
+
+Embedded (remote_tty) builds have no Warp AI, so Next Command now asks the
+host app (window.warpPanelNextCommand) with Warp's own request JSON, and the
+host answers with its fast model. It's opt-in (host.ai.next_command, off by
+default) and only runs while private routing is on, since it sends recent
+commands and the last command's output. The planned "Next Command" settings
+row becomes a real toggle.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/platform/wasm.rs                 | 17 +++++++
+ app/src/server/server_api.rs             | 18 +++++++
+ app/src/settings/ai.rs                   | 11 +++++
+ app/src/settings/host_ai.rs              | 10 ++++
+ app/src/settings_view/warp_agent_page.rs | 62 +++++++++++++++++++++---
+ 5 files changed, 112 insertions(+), 6 deletions(-)
+
+diff --git a/app/src/platform/wasm.rs b/app/src/platform/wasm.rs
+index c349a2c..43561bd 100644
+--- a/app/src/platform/wasm.rs
++++ b/app/src/platform/wasm.rs
+@@ -53,6 +53,9 @@ mod ffi {
+             stage: &str,
+         ) -> Result<js_sys::Promise, JsValue>;
+ 
++        #[wasm_bindgen(js_name = "warpPanelNextCommand", catch)]
++        pub fn next_command(request_json: &str) -> Result<js_sys::Promise, JsValue>;
++
+         #[wasm_bindgen(js_name = "warpPanelAgentConversations", catch)]
+         pub fn agent_conversations() -> Result<js_sys::Promise, JsValue>;
+ 
+@@ -192,6 +195,20 @@ pub async fn generate_commands_in_host(
+         .collect())
+ }
+ 
++/// Predicts the next command via the embedding host app's
++/// `window.warpPanelNextCommand(requestJson)`, which gets Warp's next-command request as JSON and
++/// resolves to the suggested command, or to null/empty when it has none.
++pub async fn next_command_in_host(request_json: String) -> Result<Option<String>, String> {
++    let promise = ffi::next_command(&request_json).map_err(|err| format!("{err:?}"))?;
++    let result = wasm_bindgen_futures::JsFuture::from(promise)
++        .await
++        .map_err(|err| err.as_string().unwrap_or_else(|| format!("{err:?}")))?;
++    Ok(result
++        .as_string()
++        .map(|command| command.trim().to_owned())
++        .filter(|command| !command.is_empty()))
++}
++
+ /// Asks the embedding host app to confirm an action with a modal dialog
+ /// (`window.warpPanelConfirm(message, detail, confirmLabel)`, resolving to a boolean). Resolves
+ /// to false if the host doesn't provide it or the user cancels.
+diff --git a/app/src/server/server_api.rs b/app/src/server/server_api.rs
+index 4dbf34c..44e0ec0 100644
+--- a/app/src/server/server_api.rs
++++ b/app/src/server/server_api.rs
+@@ -1172,6 +1172,24 @@ impl ServerApi {
+         team_scope: RequestTeamScope,
+     ) -> Result<generate_ai_input_suggestions::GenerateAIInputSuggestionsResponseV2, AIApiError>
+     {
++        // Embedded builds answer with the host app's own AI provider (bring-your-own-key).
++        #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
++        {
++            let _ = team_scope;
++            let request_json = serde_json::to_string(request).map_err(anyhow::Error::from)?;
++            let command = crate::platform::wasm::next_command_in_host(request_json)
++                .await
++                .map_err(|err| anyhow::anyhow!("host next command failed: {err}"))?
++                .unwrap_or_default();
++            return Ok(
++                generate_ai_input_suggestions::GenerateAIInputSuggestionsResponseV2 {
++                    commands: vec![command.clone()],
++                    ai_queries: vec![],
++                    most_likely_action: command,
++                },
++            );
++        }
++        #[allow(unreachable_code)]
+         let auth_token = self.get_or_refresh_access_token().await?;
+ 
+         let mut request_builder = self.base_client.http_client().post(format!(
+diff --git a/app/src/settings/ai.rs b/app/src/settings/ai.rs
+index d8eef0e..ba2ef99 100644
+--- a/app/src/settings/ai.rs
++++ b/app/src/settings/ai.rs
+@@ -2376,6 +2376,17 @@ impl AISettings {
+         self.is_active_ai_enabled(app) && *self.git_operations_autogen_enabled_internal
+     }
+ 
++    /// Embedded builds have no Warp AI: the host answers Next Command with its own provider. It
++    /// sends command output, so it's opt-in and only runs with private routing.
++    #[cfg(feature = "remote_tty")]
++    pub fn is_intelligent_autosuggestions_enabled(&self, app: &warpui::AppContext) -> bool {
++        let host = crate::settings::HostAiSettings::as_ref(app);
++        *host.next_command
++            && *host.private_routing
++            && AppExecutionMode::as_ref(app).allows_active_ai()
++    }
++
++    #[cfg(not(feature = "remote_tty"))]
+     pub fn is_intelligent_autosuggestions_enabled(&self, app: &warpui::AppContext) -> bool {
+         self.is_active_ai_enabled(app) && *self.intelligent_autosuggestions_enabled_internal
+     }
+diff --git a/app/src/settings/host_ai.rs b/app/src/settings/host_ai.rs
+index 8c976cc..4630ee8 100644
+--- a/app/src/settings/host_ai.rs
++++ b/app/src/settings/host_ai.rs
+@@ -112,6 +112,16 @@ define_settings_group!(HostAiSettings, settings: [
+         toml_path: "host.ai.recent_commands_in_context",
+         description: "How many of your most recent commands to send with AI Command Search requests. Only used while private routing is on.",
+     },
++    next_command: HostAiNextCommand {
++        type: bool,
++        default: false,
++        supported_platforms: SupportedPlatforms::ALL,
++        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
++        surface: settings::SettingSurfaces::GUI,
++        private: false,
++        toml_path: "host.ai.next_command",
++        description: "Suggest the next command with the fast model after a command finishes. Sends recent commands and their output, so it only runs while private routing is on.",
++    },
+     keys_to_host: HostKeysToHost {
+         type: HashMap<String, String>,
+         default: HashMap::default(),
+diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
+index c97d32e..610a5df 100644
+--- a/app/src/settings_view/warp_agent_page.rs
++++ b/app/src/settings_view/warp_agent_page.rs
+@@ -101,7 +101,7 @@ use crate::server::telemetry::{
+ };
+ use crate::settings::{
+     HOST_AI_EFFORT_CHOICES, HostAiExpandedEffort, HostAiPriority, HostAiPrivateRouting,
+-    HostAiRecentCommandsInContext, HostAiSettings,
++    HostAiNextCommand, HostAiRecentCommandsInContext, HostAiSettings,
+     AIAutoDetectionEnabled, AICommandDenylist, AISettings, AISettingsChangedEvent,
+     AgentModeQuerySuggestionsEnabled, AutoApproveBypassesCommandDenylist, AwsBedrockAutoLogin,
+     AwsBedrockCredentialsEnabled, CanUseWarpCreditsForFallback, AiCommandSearchDebounceMs, EnableAiCommandSearchHashTrigger,
+@@ -2339,11 +2339,7 @@ impl WarpAgentPageView {
+                 Category::new(
+                     "Suggestions",
+                     vec![
+-                        Box::new(PlannedFeatureWidget::new(
+-                            "Next Command",
+-                            NEXT_COMMAND_DESCRIPTION,
+-                            "ai a.i. next command suggestions autosuggestions planned",
+-                        )),
++                        Box::new(HostAiNextCommandWidget::default()),
+                         Box::new(PlannedFeatureWidget::new(
+                             "Prompt Suggestions",
+                             PROMPT_SUGGESTIONS_DESCRIPTION,
+@@ -2650,6 +2646,7 @@ pub enum WarpAgentPageAction {
+     SetAiCommandSearchDebounceMs(u32),
+     SetHostAiExpandedEffort(String),
+     ToggleHostAiPrivateRouting,
++    ToggleHostAiNextCommand,
+     SetHostAiRecentCommands(u32),
+     ToggleShowAgentTips,
+     ToggleShowOzUpdatesInZeroState,
+@@ -3007,6 +3004,15 @@ impl TypedActionView for WarpAgentPageView {
+                 }
+                 ctx.notify();
+             }
++            WarpAgentPageAction::ToggleHostAiNextCommand => {
++                // Next Command sends command output; it's only offered with private routing.
++                let settings = HostAiSettings::as_ref(ctx);
++                let enabled = !*settings.next_command && *settings.private_routing;
++                HostAiSettings::handle(ctx).update(ctx, |settings, ctx| {
++                    report_if_error!(settings.next_command.set_value(enabled, ctx));
++                });
++                ctx.notify();
++            }
+             WarpAgentPageAction::ToggleHostAiPrivateRouting => {
+                 let set_private_routing = |enabled: bool, ctx: &mut ViewContext<Self>| {
+                     HostAiSettings::handle(ctx).update(ctx, |settings, ctx| {
+@@ -7509,6 +7515,50 @@ impl SettingsWidget for HostAiPrivateRoutingWidget {
+     }
+ }
+ 
++/// Next Command through the host's fast model; only available with private routing on.
++#[derive(Default)]
++struct HostAiNextCommandWidget {
++    toggle: SwitchStateHandle,
++}
++
++impl SettingsWidget for HostAiNextCommandWidget {
++    type View = WarpAgentPageView;
++
++    fn search_terms(&self) -> &str {
++        "ai a.i. next command suggestions autosuggestions privacy"
++    }
++
++    fn render(&self, view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++        let settings = HostAiSettings::as_ref(app);
++        let private_routing = *settings.private_routing;
++        let toggle = render_ai_setting_toggle::<HostAiNextCommand>(
++            "Next Command",
++            WarpAgentPageAction::ToggleHostAiNextCommand,
++            *settings.next_command && private_routing,
++            private_routing,
++            self.toggle.clone(),
++            &view.local_only_icon_tooltip_states,
++            app,
++        );
++        let description = if private_routing {
++            "When a command finishes, the fast model suggests the next one as a grey \
++             autosuggestion (accept with \u{2192}). Sends recent commands and the last output."
++        } else {
++            "Only available with private routing on, since it sends command output."
++        };
++        let column = Flex::column()
++            .with_spacing(4.)
++            .with_child(toggle)
++            .with_child(
++                Text::new(description, appearance.ui_font_family(), CONTENT_FONT_SIZE)
++                    .with_color(styles::description_font_color(true, app).into())
++                    .finish(),
++            )
++            .finish();
++        host_setting_row(column)
++    }
++}
++
+ const HOST_AI_RECENT_COMMANDS_CHOICES: [u32; 5] = [0, 1, 3, 5, 10];
+ 
+ /// How many recent commands go along with `#` requests (only with private routing on).

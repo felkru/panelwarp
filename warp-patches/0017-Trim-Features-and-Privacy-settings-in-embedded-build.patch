@@ -1,0 +1,215 @@
+From 2c9702e5bc5e36d5ef09641f34d289bf1f884f8f Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 16:16:55 -0700
+Subject: [PATCH 17/49] Trim Features and Privacy settings in embedded builds
+
+Telemetry and crash reports are forced off. The Privacy page keeps only
+secret redaction. Features drops the agent bar, default mode, changelog,
+@ menu, slash commands and code outline rows.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/settings/privacy.rs            | 23 +++++++++++----
+ app/src/settings_view/features_page.rs | 40 ++++++++++++++++----------
+ app/src/settings_view/privacy_page.rs  |  8 ++++++
+ 3 files changed, 50 insertions(+), 21 deletions(-)
+
+diff --git a/app/src/settings/privacy.rs b/app/src/settings/privacy.rs
+index c11710c..e8a3fa6 100644
+--- a/app/src/settings/privacy.rs
++++ b/app/src/settings/privacy.rs
+@@ -139,6 +139,9 @@ maybe_define_setting!(HasInitializedDefaultSecretRegexes, group: PrivacySettings
+     private: true,
+ });
+ 
++/// Embedded (`remote_tty`) builds force telemetry and crash reporting off.
++const EMBEDDED: bool = cfg!(feature = "remote_tty");
++
+ /// Singleton model for managing the user's privacy settings (whether the user has enabled crash
+ /// reporting and/or telemetry).
+ pub struct PrivacySettings {
+@@ -196,6 +199,9 @@ impl PrivacySettingsSnapshot {
+     }
+ 
+     pub fn should_disable_telemetry(&self) -> bool {
++        if EMBEDDED {
++            return true;
++        }
+         // If a user has opted in to the agent mode analytics experiment, telemetry must be enabled.
+         !self.is_telemetry_enabled
+             && !self.is_telemetry_force_enabled
+@@ -246,8 +252,11 @@ impl PrivacySettings {
+         // Initialize from `WarpDrivePrivacySettings`, which is the source of truth for these
+         // booleans.
+         let warp_drive_privacy = WarpDrivePrivacySettings::as_ref(ctx);
+-        let is_telemetry_enabled = *warp_drive_privacy.is_telemetry_enabled.value();
+-        let is_crash_reporting_enabled = *warp_drive_privacy.is_crash_reporting_enabled.value();
++        // Embedded (`remote_tty`) builds never send telemetry or crash reports.
++        let is_telemetry_enabled =
++            !EMBEDDED && *warp_drive_privacy.is_telemetry_enabled.value();
++        let is_crash_reporting_enabled =
++            !EMBEDDED && *warp_drive_privacy.is_crash_reporting_enabled.value();
+         let is_cloud_conversation_storage_enabled = *warp_drive_privacy
+             .is_cloud_conversation_storage_enabled
+             .value();
+@@ -308,7 +317,7 @@ impl PrivacySettings {
+     }
+ 
+     pub fn set_is_telemetry_force_enabled(&mut self, is_telemetry_force_enabled: bool) {
+-        self.is_telemetry_force_enabled = is_telemetry_force_enabled;
++        self.is_telemetry_force_enabled = is_telemetry_force_enabled && !EMBEDDED;
+     }
+ 
+     pub fn is_enterprise_secret_redaction_enabled(&self) -> bool {
+@@ -365,8 +374,8 @@ impl PrivacySettings {
+ 
+     pub fn refresh_to_default(&mut self) {
+         // TODO(zach): this seems incorrect - should we also update the values on disk?
+-        self.is_telemetry_enabled = true;
+-        self.is_crash_reporting_enabled = true;
++        self.is_telemetry_enabled = !EMBEDDED;
++        self.is_crash_reporting_enabled = !EMBEDDED;
+         self.is_cloud_conversation_storage_enabled = true;
+         self.is_telemetry_force_enabled = false;
+         self.is_enterprise_secret_redaction_enabled = false;
+@@ -478,7 +487,7 @@ impl PrivacySettings {
+                 .then_some(false),
+             is_telemetry_enabled: self.is_telemetry_enabled,
+             is_crash_reporting_enabled: self.is_crash_reporting_enabled,
+-            is_telemetry_force_enabled: self.is_telemetry_force_enabled,
++            is_telemetry_force_enabled: self.is_telemetry_force_enabled && !EMBEDDED,
+             should_collect_ai_ugc_telemetry: should_collect_ai_ugc_telemetry(
+                 app,
+                 self.is_telemetry_enabled,
+@@ -496,6 +505,7 @@ impl PrivacySettings {
+         new_value: bool,
+         ctx: &mut ModelContext<PrivacySettings>,
+     ) {
++        let new_value = new_value && !EMBEDDED;
+         let old_value = self.is_crash_reporting_enabled;
+         if new_value != old_value {
+             self.is_crash_reporting_enabled = new_value;
+@@ -532,6 +542,7 @@ impl PrivacySettings {
+         new_value: bool,
+         ctx: &mut ModelContext<PrivacySettings>,
+     ) {
++        let new_value = new_value && !EMBEDDED;
+         let old_value = self.is_telemetry_enabled;
+         if new_value != old_value {
+             self.is_telemetry_enabled = new_value;
+diff --git a/app/src/settings_view/features_page.rs b/app/src/settings_view/features_page.rs
+index 1ca1948..cf75a3a 100644
+--- a/app/src/settings_view/features_page.rs
++++ b/app/src/settings_view/features_page.rs
+@@ -2774,8 +2774,13 @@ impl FeaturesPageView {
+     }
+ 
+     fn build_page(ctx: &mut ViewContext<Self>) -> PageType<Self> {
+-        let mut general_widgets: Vec<Box<dyn SettingsWidget<View = Self>>> =
+-            vec![Box::new(DefaultSessionModeWidget::default())];
++        // Embedded (`remote_tty`) builds have no Warp Agent, Warp-run updates or code features:
++        // the rows for those are left out.
++        let embedded = cfg!(feature = "remote_tty");
++        let mut general_widgets: Vec<Box<dyn SettingsWidget<View = Self>>> = Vec::new();
++        if !embedded {
++            general_widgets.push(Box::new(DefaultSessionModeWidget::default()));
++        }
+ 
+         let native_preference_settings = NativePreferenceSettings::as_ref(ctx);
+         if native_preference_settings
+@@ -2818,9 +2823,10 @@ impl FeaturesPageView {
+         }
+ 
+         let changelog_settings = ChangelogSettings::as_ref(ctx);
+-        if changelog_settings
+-            .show_changelog_after_update
+-            .is_supported_on_current_platform()
++        if !embedded
++            && changelog_settings
++                .show_changelog_after_update
++                .is_supported_on_current_platform()
+         {
+             general_widgets.push(Box::new(ShowChangelogWidget::default()));
+         }
+@@ -2978,14 +2984,16 @@ impl FeaturesPageView {
+             editor_widgets.push(Box::new(AutosuggestionIgnoreButtonWidget::default()));
+         }
+ 
+-        if input_settings
+-            .at_context_menu_in_terminal_mode
+-            .is_supported_on_current_platform()
++        if !embedded
++            && input_settings
++                .at_context_menu_in_terminal_mode
++                .is_supported_on_current_platform()
+         {
+             editor_widgets.push(Box::new(AtContextMenuInTerminalModeWidget::default()));
+         }
+ 
+-        if FeatureFlag::AgentView.is_enabled()
++        if !embedded
++            && FeatureFlag::AgentView.is_enabled()
+             && input_settings
+                 .enable_slash_commands_in_terminal
+                 .is_supported_on_current_platform()
+@@ -2993,9 +3001,10 @@ impl FeaturesPageView {
+             editor_widgets.push(Box::new(SlashCommandsInTerminalModeWidget::default()));
+         }
+ 
+-        if input_settings
+-            .outline_codebase_symbols_for_at_context_menu
+-            .is_supported_on_current_platform()
++        if !embedded
++            && input_settings
++                .outline_codebase_symbols_for_at_context_menu
++                .is_supported_on_current_platform()
+             && FeatureFlag::AIContextMenuCode.is_enabled()
+         {
+             editor_widgets.push(Box::new(
+@@ -3003,7 +3012,7 @@ impl FeaturesPageView {
+             ));
+         }
+ 
+-        if FeatureFlag::AgentView.is_enabled() {
++        if !embedded && FeatureFlag::AgentView.is_enabled() {
+             editor_widgets.push(Box::new(ShowTerminalInputMessageLineWidget::default()));
+         }
+ 
+@@ -3047,7 +3056,7 @@ impl FeaturesPageView {
+             terminal_widgets.push(Box::new(AudibleBellWidget::default()));
+         }
+ 
+-        if FeatureFlag::AgentView.is_enabled() {
++        if !embedded && FeatureFlag::AgentView.is_enabled() {
+             terminal_widgets.push(Box::new(ShowTerminalZeroStateBlockWidget::default()));
+         }
+ 
+@@ -5312,7 +5321,8 @@ impl SettingsWidget for DesktopNotificationsWidget {
+             column.add_child(render_group(toggles, appearance));
+         }
+ 
+-        if FeatureFlag::HOANotifications.is_enabled() {
++        // Warp Agent toasts; embedded builds have no Warp Agent.
++        if FeatureFlag::HOANotifications.is_enabled() && !cfg!(feature = "remote_tty") {
+             let ai_settings = AISettings::as_ref(app);
+             let show_agent_notifications = *ai_settings.show_agent_notifications;
+             column.add_child(render_body_item::<FeaturesPageAction>(
+diff --git a/app/src/settings_view/privacy_page.rs b/app/src/settings_view/privacy_page.rs
+index c6f001e..f602fa6 100644
+--- a/app/src/settings_view/privacy_page.rs
++++ b/app/src/settings_view/privacy_page.rs
+@@ -219,6 +219,14 @@ impl PrivacyPageView {
+     }
+ 
+     fn build_page() -> PageType<Self> {
++        // Embedded (`remote_tty`) builds have no Warp account, cloud or telemetry (forced off in
++        // `PrivacySettings`): only the local secret redaction is left.
++        if cfg!(feature = "remote_tty") {
++            return PageType::new_uncategorized(
++                vec![Box::new(SecretRedactionWidget::default())],
++                Some(PageTitle::new("Privacy")),
++            );
++        }
+         let mut widgets: Vec<Box<dyn SettingsWidget<View = Self>>> = vec![
+             Box::new(SecretRedactionWidget::default()),
+             Box::new(AppAnalyticsWidget::default()),

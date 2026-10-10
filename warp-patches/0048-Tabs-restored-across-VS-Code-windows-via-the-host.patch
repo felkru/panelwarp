@@ -1,0 +1,648 @@
+From fe8ed4f04bcd6f0cac4c921bb967c2830e1bd565 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Fri, 9 Oct 2026 00:22:02 -0700
+Subject: [PATCH 48/49] Tabs restored across VS Code windows via the host
+
+On the web, Warp's session restoration has no SQLite, so the layout (tabs,
+splits, titles, each pane's directory) and finished blocks go to the host
+page, which keeps them in the extension's warp.sqlite shared by all VS Code
+windows. At startup Warp restores from the host's latest layout and opens
+each restored pane's shell in its saved directory.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/lib.rs                                |   6 +
+ app/src/pane_group/mod.rs                     |   6 +-
+ app/src/pane_group/pane/terminal_pane.rs      |  11 +
+ app/src/platform/wasm.rs                      | 359 ++++++++++++++++++
+ app/src/terminal/general_settings.rs          |   2 +-
+ app/src/terminal/remote_tty/event_loop.rs     |  14 +-
+ .../terminal/remote_tty/terminal_manager.rs   |  11 +-
+ app/src/terminal/view.rs                      |  14 +
+ app/src/terminal/view/docker_sandbox/mod.rs   |   2 +
+ app/src/workspace/global_actions.rs           |   3 +
+ 10 files changed, 421 insertions(+), 7 deletions(-)
+
+diff --git a/app/src/lib.rs b/app/src/lib.rs
+index 1f0c9d5..c8bcf54 100644
+--- a/app/src/lib.rs
++++ b/app/src/lib.rs
+@@ -1722,6 +1722,10 @@ pub(crate) fn initialize_app(
+             )
+         });
+ 
++    // The web build has no SQLite of its own; the embedding host keeps the tabs.
++    #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
++    let app_state = app_state.or_else(crate::platform::wasm::host_session::load);
++
+     // The daemon's `PersistedDataScope::CodebaseIndicesOnly` read already
+     // skips everything except codebase index metadata.
+     if matches!(launch_mode, LaunchMode::RemoteServerDaemon { .. }) {
+@@ -2085,6 +2089,8 @@ pub(crate) fn initialize_app(
+         command_history
+     };
+     ctx.add_singleton_model(move |_| History::new(command_history));
++    #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
++    ctx.add_singleton_model(crate::platform::wasm::host_session::Autosave::new);
+ 
+     ctx.add_singleton_model(CustomSecretRegexUpdater::new);
+ 
+diff --git a/app/src/pane_group/mod.rs b/app/src/pane_group/mod.rs
+index 2d734dd..7ab56e0 100644
+--- a/app/src/pane_group/mod.rs
++++ b/app/src/pane_group/mod.rs
+@@ -1646,10 +1646,12 @@ impl PaneGroup {
+                         }
+                     });
+ 
++                // The web build can't check the file system; the PTY host falls back to its
++                // default directory if this one is gone.
+                 let startup_directory = terminal_snapshot
+                     .cwd
+                     .map(PathBuf::from)
+-                    .filter(|path| path.is_dir());
++                    .filter(|path| cfg!(feature = "remote_tty") || path.is_dir());
+ 
+                 // Filter conversation IDs to only include those that have task messages
+                 // and are not entirely passive (ignored suggestions).
+@@ -6114,6 +6116,8 @@ impl PaneGroup {
+         cfg_if::cfg_if! {
+             if #[cfg(feature = "remote_tty")] {
+                 let terminal_init = RemoteTtyTerminalManager::create_model(
++                    startup_directory,
++                    restored_blocks,
+                     resources,
+                     initial_size,
+                     model_event_sender,
+diff --git a/app/src/pane_group/pane/terminal_pane.rs b/app/src/pane_group/pane/terminal_pane.rs
+index b42bd77..a9737f7 100644
+--- a/app/src/pane_group/pane/terminal_pane.rs
++++ b/app/src/pane_group/pane/terminal_pane.rs
+@@ -1009,6 +1009,17 @@ fn handle_terminal_view_event(
+                                 },
+                             );
+                         }
++                        // The web build has no SQLite writer; the embedding host stores blocks.
++                        #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
++                        if *GeneralSettings::as_ref(ctx).restore_session
++                            && AppExecutionMode::as_ref(ctx).can_save_session()
++                            && group.model_event_sender.is_none()
++                        {
++                            crate::platform::wasm::host_session::save_block(
++                                &pane.session_uuid(),
++                                block,
++                            );
++                        }
+                         ctx.emit(pane_group::Event::ActiveSessionChanged);
+                     }
+                     None => {
+diff --git a/app/src/platform/wasm.rs b/app/src/platform/wasm.rs
+index 3c6c1eb..1fdd574 100644
+--- a/app/src/platform/wasm.rs
++++ b/app/src/platform/wasm.rs
+@@ -36,6 +36,15 @@ mod ffi {
+         #[wasm_bindgen(js_name = "warpPanelCommandHistory", catch)]
+         pub fn command_history() -> Result<Option<String>, JsValue>;
+ 
++        #[wasm_bindgen(js_name = "warpPanelSession", catch)]
++        pub fn session() -> Result<Option<String>, JsValue>;
++
++        #[wasm_bindgen(js_name = "warpPanelSaveSession", catch)]
++        pub fn save_session(json: &str) -> Result<(), JsValue>;
++
++        #[wasm_bindgen(js_name = "warpPanelSaveBlock", catch)]
++        pub fn save_block(pane_uuid: &str, json: &str) -> Result<(), JsValue>;
++
+         #[wasm_bindgen(js_name = "warpPanelWorkflows", catch)]
+         pub fn workflows() -> Result<Option<String>, JsValue>;
+ 
+@@ -490,3 +499,353 @@ pub mod host_history {
+         }
+     }
+ }
++
++/// Tabs restored across panel reloads and VS Code windows, like desktop Warp's session
++/// restoration, which keeps them in SQLite: the embedding host stores the latest layout (tabs,
++/// splits, titles, each terminal's directory) and recent blocks per terminal pane in its own SQLite
++/// file (VS Code: `sessionStore.js`), and hands back the latest at startup.
++#[cfg(feature = "remote_tty")]
++pub mod host_session {
++    use std::cell::RefCell;
++    use std::collections::HashMap;
++    use std::sync::Arc;
++
++    use serde::{Deserialize, Serialize};
++
++    use crate::ai::blocklist::SerializedBlockListItem;
++    use crate::app_state::{
++        AppState, BranchSnapshot, LeafContents, LeafSnapshot, PaneFlex, PaneNodeSnapshot,
++        PaneUuid, SplitDirection, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
++    };
++    use crate::tab::SelectedTabColor;
++    use crate::terminal::model::block::SerializedBlock;
++
++    #[derive(Serialize, Deserialize, PartialEq)]
++    #[serde(rename_all = "camelCase")]
++    struct Session {
++        windows: Vec<Window>,
++        active_window_index: Option<usize>,
++    }
++
++    #[derive(Serialize, Deserialize, PartialEq)]
++    #[serde(rename_all = "camelCase")]
++    struct Window {
++        tabs: Vec<Tab>,
++        active_tab_index: usize,
++        #[serde(default)]
++        vertical_tabs_panel_open: bool,
++    }
++
++    #[derive(Serialize, Deserialize, PartialEq)]
++    #[serde(rename_all = "camelCase")]
++    struct Tab {
++        custom_title: Option<String>,
++        #[serde(default)]
++        selected_color: SelectedTabColor,
++        #[serde(default)]
++        pinned: bool,
++        root: Node,
++    }
++
++    /// A pane tree node; only terminal panes are kept (others reopen from VS Code itself).
++    #[derive(Serialize, Deserialize, PartialEq)]
++    #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
++    enum Node {
++        Branch {
++            vertical: bool,
++            children: Vec<Child>,
++        },
++        Terminal {
++            /// The pane's id in hex; its blocks are stored under it.
++            uuid: String,
++            cwd: Option<String>,
++            #[serde(default)]
++            is_focused: bool,
++            #[serde(default)]
++            is_active: bool,
++            #[serde(default)]
++            custom_vertical_tabs_title: Option<String>,
++        },
++    }
++
++    #[derive(Serialize, Deserialize, PartialEq)]
++    struct Child {
++        flex: f32,
++        node: Node,
++    }
++
++    #[derive(Deserialize)]
++    struct Stored {
++        session: Session,
++        #[serde(default)]
++        blocks: HashMap<String, Vec<SerializedBlock>>,
++    }
++
++    thread_local! {
++        /// The last layout sent, so unchanged layouts aren't sent again.
++        static LAST_SAVED: RefCell<Option<String>> = const { RefCell::new(None) };
++    }
++
++    /// The tabs to restore, with their panes' blocks; None if the host has none.
++    pub fn load() -> Option<AppState> {
++        let json = super::ffi::session().ok().flatten()?;
++        let stored: Stored = match serde_json::from_str(&json) {
++            Ok(stored) => stored,
++            Err(err) => {
++                log::warn!("Ignoring unreadable saved tabs: {err}");
++                return None;
++            }
++        };
++        let block_lists = stored
++            .blocks
++            .into_iter()
++            .filter_map(|(uuid, blocks)| {
++                let uuid = hex::decode(uuid).ok()?;
++                let items = blocks
++                    .into_iter()
++                    .map(|block| SerializedBlockListItem::Command {
++                        block: Box::new(block),
++                    })
++                    .collect();
++                Some((PaneUuid(uuid), items))
++            })
++            .collect();
++        let windows: Vec<WindowSnapshot> = stored
++            .session
++            .windows
++            .into_iter()
++            .filter_map(window_snapshot)
++            .collect();
++        if windows.is_empty() {
++            return None;
++        }
++        let active_window_index = stored
++            .session
++            .active_window_index
++            .filter(|index| *index < windows.len());
++        Some(AppState {
++            windows,
++            active_window_index,
++            block_lists: Arc::new(block_lists),
++            running_mcp_servers: Vec::new(),
++        })
++    }
++
++    /// Sends the current layout to the host if it changed since the last save.
++    pub fn save(app_state: &AppState) {
++        let session = Session {
++            windows: app_state.windows.iter().filter_map(window).collect(),
++            active_window_index: app_state.active_window_index,
++        };
++        // Nothing to restore: e.g. the page is still starting, or every tab was closed (then the
++        // panel opens a fresh tab anyway).
++        if session.windows.is_empty() {
++            return;
++        }
++        let Ok(json) = serde_json::to_string(&session) else {
++            return;
++        };
++        let changed = LAST_SAVED.with(|last| {
++            let mut last = last.borrow_mut();
++            if last.as_deref() == Some(json.as_str()) {
++                return false;
++            }
++            *last = Some(json.clone());
++            true
++        });
++        if changed {
++            let _ = super::ffi::save_session(&json);
++        }
++    }
++
++    /// How often the layout is checked for changes; the panel can close (window closed, VS Code
++    /// quit) without warning, so this bounds what's lost.
++    const AUTOSAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
++
++    /// Saves the layout every [`AUTOSAVE_INTERVAL`] (only sent when it changed), on top of the
++    /// window events desktop Warp saves on.
++    pub struct Autosave;
++
++    impl Autosave {
++        pub fn new(ctx: &mut warpui::ModelContext<Self>) -> Self {
++            Self::schedule(ctx);
++            Self
++        }
++
++        fn schedule(ctx: &mut warpui::ModelContext<Self>) {
++            ctx.spawn(
++                warpui::r#async::Timer::after(AUTOSAVE_INTERVAL),
++                |_, _, ctx| {
++                    ctx.dispatch_global_action("workspace:save_app", &());
++                    Self::schedule(ctx);
++                },
++            );
++        }
++    }
++
++    impl warpui::Entity for Autosave {
++        type Event = ();
++    }
++
++    impl warpui::SingletonEntity for Autosave {}
++
++    /// Sends a finished block of a terminal pane to the host.
++    pub fn save_block(pane_uuid: &[u8], block: &SerializedBlock) {
++        if let Ok(json) = serde_json::to_string(block) {
++            let _ = super::ffi::save_block(&hex::encode(pane_uuid), &json);
++        }
++    }
++
++    fn window(snapshot: &WindowSnapshot) -> Option<Window> {
++        if snapshot.quake_mode {
++            return None;
++        }
++        let mut active_tab_index = snapshot.active_tab_index;
++        let mut tabs = Vec::new();
++        for (index, tab) in snapshot.tabs.iter().enumerate() {
++            match self::tab(tab) {
++                Some(tab) => tabs.push(tab),
++                None if index < snapshot.active_tab_index => active_tab_index -= 1,
++                None => {}
++            }
++        }
++        if tabs.is_empty() {
++            return None;
++        }
++        Some(Window {
++            active_tab_index: active_tab_index.min(tabs.len() - 1),
++            tabs,
++            vertical_tabs_panel_open: snapshot.vertical_tabs_panel_open,
++        })
++    }
++
++    fn tab(snapshot: &TabSnapshot) -> Option<Tab> {
++        Some(Tab {
++            custom_title: snapshot.custom_title.clone(),
++            selected_color: snapshot.selected_color,
++            pinned: snapshot.pinned,
++            root: node(&snapshot.root)?,
++        })
++    }
++
++    fn node(snapshot: &PaneNodeSnapshot) -> Option<Node> {
++        match snapshot {
++            PaneNodeSnapshot::Branch(BranchSnapshot {
++                direction,
++                children,
++            }) => {
++                let mut children: Vec<Child> = children
++                    .iter()
++                    .filter_map(|(flex, child)| {
++                        Some(Child {
++                            flex: flex.0,
++                            node: node(child)?,
++                        })
++                    })
++                    .collect();
++                match children.len() {
++                    0 => None,
++                    1 => children.pop().map(|child| child.node),
++                    _ => Some(Node::Branch {
++                        vertical: *direction == SplitDirection::Vertical,
++                        children,
++                    }),
++                }
++            }
++            PaneNodeSnapshot::Leaf(LeafSnapshot {
++                is_focused,
++                custom_vertical_tabs_title,
++                contents: LeafContents::Terminal(terminal),
++            }) => Some(Node::Terminal {
++                uuid: hex::encode(&terminal.uuid),
++                cwd: terminal.cwd.clone(),
++                is_focused: *is_focused,
++                is_active: terminal.is_active,
++                custom_vertical_tabs_title: custom_vertical_tabs_title.clone(),
++            }),
++            PaneNodeSnapshot::Leaf(_) => None,
++        }
++    }
++
++    fn window_snapshot(window: Window) -> Option<WindowSnapshot> {
++        let tabs: Vec<TabSnapshot> = window.tabs.into_iter().filter_map(tab_snapshot).collect();
++        if tabs.is_empty() {
++            return None;
++        }
++        Some(WindowSnapshot {
++            active_tab_index: window.active_tab_index.min(tabs.len() - 1),
++            tabs,
++            team_uid: None,
++            bounds: None,
++            fullscreen_state: Default::default(),
++            quake_mode: false,
++            universal_search_width: None,
++            warp_ai_width: None,
++            voltron_width: None,
++            warp_drive_index_width: None,
++            left_panel_open: false,
++            vertical_tabs_panel_open: window.vertical_tabs_panel_open,
++            left_panel_width: None,
++            right_panel_width: None,
++            agent_management_filters: None,
++            tab_groups: Vec::new(),
++        })
++    }
++
++    fn tab_snapshot(tab: Tab) -> Option<TabSnapshot> {
++        Some(TabSnapshot {
++            custom_title: tab.custom_title,
++            root: node_snapshot(tab.root)?,
++            default_directory_color: None,
++            selected_color: tab.selected_color,
++            left_panel: None,
++            right_panel: None,
++            group_id: None,
++            pinned: tab.pinned,
++        })
++    }
++
++    fn node_snapshot(node: Node) -> Option<PaneNodeSnapshot> {
++        match node {
++            Node::Branch { vertical, children } => {
++                let children: Vec<(PaneFlex, PaneNodeSnapshot)> = children
++                    .into_iter()
++                    .filter_map(|child| Some((PaneFlex(child.flex), node_snapshot(child.node)?)))
++                    .collect();
++                if children.is_empty() {
++                    return None;
++                }
++                Some(PaneNodeSnapshot::Branch(BranchSnapshot {
++                    direction: if vertical {
++                        SplitDirection::Vertical
++                    } else {
++                        SplitDirection::Horizontal
++                    },
++                    children,
++                }))
++            }
++            Node::Terminal {
++                uuid,
++                cwd,
++                is_focused,
++                is_active,
++                custom_vertical_tabs_title,
++            } => Some(PaneNodeSnapshot::Leaf(LeafSnapshot {
++                is_focused,
++                custom_vertical_tabs_title,
++                contents: LeafContents::Terminal(TerminalPaneSnapshot {
++                    uuid: hex::decode(uuid).ok()?,
++                    cwd,
++                    shell_launch_data: None,
++                    is_active,
++                    is_read_only: false,
++                    input_config: None,
++                    llm_model_override: None,
++                    active_profile_id: None,
++                    conversation_ids_to_restore: Vec::new(),
++                    active_conversation_id: None,
++                }),
++            })),
++        }
++    }
++}
+diff --git a/app/src/terminal/general_settings.rs b/app/src/terminal/general_settings.rs
+index 6ff27fd..1e29908 100644
+--- a/app/src/terminal/general_settings.rs
++++ b/app/src/terminal/general_settings.rs
+@@ -30,7 +30,7 @@ define_settings_group!(GeneralSettings, settings: [
+     restore_session: RestoreSession {
+         type: bool,
+         default: true,
+-        supported_platforms: SupportedPlatforms::DESKTOP,
++        supported_platforms: SupportedPlatforms::ALL,
+         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+         surface: settings::SettingSurfaces::GUI,
+         private: false,
+diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
+index 9ea7a34..e245df2 100644
+--- a/app/src/terminal/remote_tty/event_loop.rs
++++ b/app/src/terminal/remote_tty/event_loop.rs
+@@ -1,4 +1,5 @@
+ use std::borrow::Cow;
++use std::path::{Path, PathBuf};
+ use std::pin::Pin;
+ use std::sync::Arc;
+ use std::sync::atomic::{AtomicBool, Ordering};
+@@ -183,6 +184,7 @@ impl EventLoop {
+     /// Starts the [`EventLoop`] by starting a websocket connection with the server and
+     /// bootstrapping the PTY.
+     pub(super) fn start(
++        startup_directory: Option<PathBuf>,
+         model: Arc<FairMutex<TerminalModel>>,
+         websocket_receiver: Receiver<EventLoopMessage>,
+         replies_tx: Sender<EventLoopMessage>,
+@@ -192,7 +194,7 @@ impl EventLoop {
+     ) -> Self {
+         let event_loop = Self::new(model, websocket_receiver, replies_tx, channel_event_listener);
+ 
+-        let url = Self::get_new_session_url(size_info);
++        let url = Self::get_new_session_url(size_info, startup_directory.as_deref());
+         let response = WebSocket::connect(url, None /* protocols */);
+ 
+         ctx.spawn(response, Self::on_ws_connection);
+@@ -226,13 +228,19 @@ impl EventLoop {
+         }
+     }
+ 
+-    fn get_new_session_url(size_info: SizeInfo) -> String {
++    fn get_new_session_url(size_info: SizeInfo, startup_directory: Option<&Path>) -> String {
+         let num_rows = size_info.rows;
+         let num_cols = size_info.columns;
+ 
+         let endpoint = create_session_endpoint();
+         let separator = if endpoint.contains('?') { '&' } else { '?' };
+-        format!("{endpoint}{separator}num_rows={num_rows}&num_cols={num_cols}")
++        let mut url = format!("{endpoint}{separator}num_rows={num_rows}&num_cols={num_cols}");
++        // The PTY host starts the shell there (e.g. a restored tab's directory) if it exists.
++        if let Some(dir) = startup_directory.and_then(Path::to_str) {
++            url.push_str("&cwd=");
++            url.extend(url::form_urlencoded::byte_serialize(dir.as_bytes()));
++        }
++        url
+     }
+ 
+     /// Starts tasks to listen to and write to the websocket. On a reconnect, hands the new sink to
+diff --git a/app/src/terminal/remote_tty/terminal_manager.rs b/app/src/terminal/remote_tty/terminal_manager.rs
+index 3b05701..a44fca6 100644
+--- a/app/src/terminal/remote_tty/terminal_manager.rs
++++ b/app/src/terminal/remote_tty/terminal_manager.rs
+@@ -1,4 +1,5 @@
+ use std::any::Any;
++use std::path::PathBuf;
+ use std::sync::Arc;
+ use std::sync::mpsc::SyncSender;
+ 
+@@ -10,6 +11,7 @@ use warpui::{AppContext, ModelHandle, ViewHandle, WindowId};
+ use crate::ai::blocklist::InputConfig;
+ use crate::context_chips::prompt_type::PromptType;
+ use crate::pane_group::TerminalViewResources;
++use crate::ai::blocklist::SerializedBlockListItem;
+ use crate::persistence::ModelEvent;
+ use crate::terminal::event_listener::ChannelEventListener;
+ use crate::terminal::model::session::Sessions;
+@@ -50,6 +52,8 @@ pub struct TerminalManagerInit {
+ impl TerminalManager {
+     /// Creates a terminal manager model that feeds bytes to/from a remote PTY.
+     pub fn create_model(
++        startup_directory: Option<PathBuf>,
++        restored_blocks: Option<&Vec<SerializedBlockListItem>>,
+         resources: TerminalViewResources,
+         initial_size: Vector2F,
+         model_event_sender: Option<SyncSender<ModelEvent>>,
+@@ -87,8 +91,8 @@ impl TerminalManager {
+ 
+         // Create the terminal model.
+         let model = terminal_manager::create_terminal_model(
+-            None, /* startup_directory */
+-            None, /* restored_blocks */
++            startup_directory.clone(),
++            restored_blocks,
+             initial_size,
+             channel_event_proxy.clone(),
+             ShellLaunchState::ShellSpawned {
+@@ -107,6 +111,7 @@ impl TerminalManager {
+         let (event_loop_tx, event_loop_rx) = async_channel::unbounded();
+ 
+         let event_loop = Self::create_and_start_event_loop(
++            startup_directory,
+             model.clone(),
+             channel_event_proxy.clone(),
+             event_loop_rx,
+@@ -196,6 +201,7 @@ impl TerminalManager {
+     }
+ 
+     fn create_and_start_event_loop(
++        startup_directory: Option<PathBuf>,
+         terminal_model: Arc<FairMutex<TerminalModel>>,
+         channel_event_listener: ChannelEventListener,
+         message_receiver: Receiver<Message>,
+@@ -205,6 +211,7 @@ impl TerminalManager {
+     ) -> ModelHandle<EventLoop> {
+         ctx.add_model(|ctx| {
+             EventLoop::start(
++                startup_directory,
+                 terminal_model,
+                 message_receiver,
+                 replies_tx,
+diff --git a/app/src/terminal/view.rs b/app/src/terminal/view.rs
+index 513ea7d..b2e179d 100644
+--- a/app/src/terminal/view.rs
++++ b/app/src/terminal/view.rs
+@@ -24389,6 +24389,20 @@ impl TerminalView {
+     }
+ 
+     pub fn pwd_if_local(&self, ctx: &AppContext) -> Option<String> {
++        // On the web, every session is "remote", but the PTY host's own shell runs on the user's
++        // machine; only an SSH session or a subshell started from it is elsewhere.
++        #[cfg(feature = "remote_tty")]
++        {
++            let session = self
++                .active_block_session_id()
++                .and_then(|id| self.sessions.as_ref(ctx).get(id))?;
++            // `is_subshell_or_ssh` is always true here: every web session is `WarpifiedRemote`.
++            if session.is_ssh_wrapper_session() || session.subshell_info().is_some() {
++                return None;
++            }
++            return self.pwd();
++        }
++        #[cfg_attr(feature = "remote_tty", allow(unreachable_code))]
+         self.active_session_path_if_local(ctx)
+             .map(|path| path.to_string_lossy().into_owned())
+     }
+diff --git a/app/src/terminal/view/docker_sandbox/mod.rs b/app/src/terminal/view/docker_sandbox/mod.rs
+index 753b5a0..8b04654 100644
+--- a/app/src/terminal/view/docker_sandbox/mod.rs
++++ b/app/src/terminal/view/docker_sandbox/mod.rs
+@@ -89,6 +89,8 @@ fn create_docker_sandbox_view(
+     cfg_if::cfg_if! {
+         if #[cfg(feature = "remote_tty")] {
+             let terminal_init = RemoteTtyTerminalManager::create_model(
++                None, /* startup_directory */
++                None, /* restored_blocks */
+                 resources,
+                 initial_size,
+                 model_event_sender,
+diff --git a/app/src/workspace/global_actions.rs b/app/src/workspace/global_actions.rs
+index a3e4c14..48b585a 100644
+--- a/app/src/workspace/global_actions.rs
++++ b/app/src/workspace/global_actions.rs
+@@ -156,6 +156,9 @@ fn save_app(_: &(), ctx: &mut AppContext) {
+         .model_event_sender
+         .clone()
+     else {
++        // The web build has no SQLite writer; the embedding host stores the tabs.
++        #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
++        crate::platform::wasm::host_session::save(&get_app_state(ctx));
+         return;
+     };
+ 

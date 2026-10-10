@@ -1,0 +1,921 @@
+From 0c6460739f4f4d24ad3a94628f7909e38ee26b12 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 15:41:03 -0700
+Subject: [PATCH 44/49] Clickable file paths on the web via the host
+
+The web build has no filesystem, so link detection sends the possible paths under
+the mouse to the host (the VS Code extension), which stats them; Cmd-click and the
+context menu open or reveal the file through the host.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/Cargo.toml                          |   3 +
+ app/build.rs                            |   4 +
+ app/src/platform/wasm.rs                |  58 ++++
+ app/src/terminal/view.rs                |  40 ++-
+ app/src/terminal/view/link_detection.rs | 432 ++++++++++++++----------
+ app/src/util/file.rs                    |  25 +-
+ app/src/util/file_link.rs               |  28 ++
+ app/src/util/mod.rs                     |   2 +
+ 8 files changed, 378 insertions(+), 214 deletions(-)
+ create mode 100644 app/src/util/file_link.rs
+
+diff --git a/app/Cargo.toml b/app/Cargo.toml
+index df3ee05..ba195ff 100644
+--- a/app/Cargo.toml
++++ b/app/Cargo.toml
+@@ -811,6 +811,9 @@ mcp_debugging_ids = []
+ oz_changelog_updates = []
+ # Remote-backed tty that connects to a PTY-like interface via a server.
+ remote_tty = ["warp_terminal/remote_tty"]
++# Clickable file paths in terminal output. Set by build.rs: always on native, and with
++# remote_tty on the web, where the host checks the paths.
++file_links = []
+ # Fix for cursor reflow bug during window resize, from Alacritty resizing logic.
+ resize_fix = []
+ pluggable_notifications = []
+diff --git a/app/build.rs b/app/build.rs
+index 44ac547..4ddd893 100644
+--- a/app/build.rs
++++ b/app/build.rs
+@@ -238,6 +238,10 @@ fn add_features(target_family: &str, target_os: &str) {
+         println!("cargo:rustc-cfg=feature=\"iterm_images\"");
+     }
+ 
++    if target_family != "wasm" || env::var("CARGO_FEATURE_REMOTE_TTY").is_ok() {
++        println!("cargo:rustc-cfg=feature=\"file_links\"");
++    }
++
+     if env::var("PROFILE").ok().is_some_and(|val| val == "debug") {
+         println!("cargo:rustc-cfg=feature=\"agent_mode_debug\"");
+     }
+diff --git a/app/src/platform/wasm.rs b/app/src/platform/wasm.rs
+index 2375aed..d8371ac 100644
+--- a/app/src/platform/wasm.rs
++++ b/app/src/platform/wasm.rs
+@@ -74,6 +74,15 @@ mod ffi {
+ 
+         #[wasm_bindgen(js_name = "warpPanelOpenAgentConversation", catch)]
+         pub fn open_agent_conversation(agent: &str, id: &str) -> Result<js_sys::Promise, JsValue>;
++
++        #[wasm_bindgen(js_name = "warpPanelResolvePaths", catch)]
++        pub fn resolve_paths(cwd: &str, candidates_json: &str) -> Result<js_sys::Promise, JsValue>;
++
++        #[wasm_bindgen(js_name = "warpPanelOpenFile", catch)]
++        pub fn open_file(path: &str, line: Option<u32>, column: Option<u32>) -> Result<(), JsValue>;
++
++        #[wasm_bindgen(js_name = "warpPanelRevealFile", catch)]
++        pub fn reveal_file(path: &str) -> Result<(), JsValue>;
+     }
+ }
+ 
+@@ -249,6 +258,55 @@ pub fn store_api_key_in_host(provider: &str, key: &str) -> bool {
+     ffi::store_api_key(provider, key).is_ok()
+ }
+ 
++/// A file path in terminal output that exists, as resolved by the host.
++#[derive(serde::Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct HostResolvedPath {
++    pub absolute_path: String,
++    #[serde(default)]
++    pub is_dir: bool,
++}
++
++/// Resolves possible file paths found in terminal output via the host's
++/// `window.warpPanelResolvePaths(cwd, candidatesJson)`: relative paths against `cwd`, `~` to the
++/// home directory. Resolves to one entry per candidate, in order: the path if it exists, else
++/// None. All None if the host doesn't provide it or fails.
++pub async fn resolve_paths_in_host(
++    cwd: String,
++    candidates: Vec<String>,
++) -> Vec<Option<HostResolvedPath>> {
++    let unresolved = || candidates.iter().map(|_| None).collect();
++    let Ok(candidates_json) = serde_json::to_string(&candidates) else {
++        return unresolved();
++    };
++    let Ok(promise) = ffi::resolve_paths(&cwd, &candidates_json) else {
++        return unresolved();
++    };
++    let Some(json) = wasm_bindgen_futures::JsFuture::from(promise)
++        .await
++        .ok()
++        .and_then(|value| value.as_string())
++    else {
++        return unresolved();
++    };
++    match serde_json::from_str::<Vec<Option<HostResolvedPath>>>(&json) {
++        Ok(resolved) if resolved.len() == candidates.len() => resolved,
++        _ => unresolved(),
++    }
++}
++
++/// Opens a file in the host's editor (VS Code), at `line`/`column` (1-based) if given.
++/// Returns false if the host doesn't provide `window.warpPanelOpenFile`.
++pub fn open_file_in_host(path: &str, line: Option<u32>, column: Option<u32>) -> bool {
++    ffi::open_file(path, line, column).is_ok()
++}
++
++/// Reveals a file or directory in the host's file explorer (VS Code's Explorer).
++/// Returns false if the host doesn't provide `window.warpPanelRevealFile`.
++pub fn reveal_file_in_host(path: &str) -> bool {
++    ffi::reveal_file(path).is_ok()
++}
++
+ /// Asks the embedding host app (e.g. the VS Code panel) to open its settings file, since the web
+ /// build keeps settings in localStorage rather than a file. Returns false if the host doesn't
+ /// provide `window.warpPanelOpenSettingsFile`.
+diff --git a/app/src/terminal/view.rs b/app/src/terminal/view.rs
+index 78182bf..6c24073 100644
+--- a/app/src/terminal/view.rs
++++ b/app/src/terminal/view.rs
+@@ -2693,6 +2693,9 @@ pub struct TerminalView {
+ 
+     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
+     file_link_scanning_join_handle: Option<JoinHandle<()>>,
++    /// The host's check of the file paths under the cursor (web build).
++    #[cfg_attr(feature = "local_fs", allow(dead_code))]
++    file_link_scan_handle: Option<SpawnedFutureHandle>,
+ 
+     last_focus_ts: Option<NaiveDateTime>,
+     tips_completed: ModelHandle<TipsCompleted>,
+@@ -4432,6 +4435,7 @@ impl TerminalView {
+             inline_banners_state: Default::default(),
+             bookmarked_blocks: Default::default(),
+             file_link_scanning_join_handle: None,
++            file_link_scan_handle: None,
+             last_focus_ts: None,
+             tips_completed: resources.tips_completed.clone(),
+             privacy_settings_snapshot: privacy_settings_handle.as_ref(ctx).get_snapshot(ctx),
+@@ -17366,6 +17370,29 @@ impl TerminalView {
+                         })
+                         .unwrap_or_default()
+                     }
++                    #[cfg(all(feature = "file_links", not(feature = "local_fs")))]
++                    GridHighlightedLink::File(file_link) => {
++                        let path = file_link.get_inner().absolute_path.clone();
++                        vec![
++                            MenuItemFields::new("Open in editor")
++                                .with_on_select_action(TerminalAction::OpenGridLink(
++                                    highlighted_link.clone(),
++                                ))
++                                .into_item(),
++                            MenuItemFields::new("Reveal in Explorer")
++                                .with_on_select_action(TerminalAction::ShowInFileExplorer(
++                                    path.clone(),
++                                ))
++                                .into_item(),
++                            MenuItemFields::new("Copy path")
++                                .with_on_select_action(TerminalAction::ContextMenu(
++                                    ContextMenuAction::CopyUrl {
++                                        url_content: path.to_string_lossy().into(),
++                                    },
++                                ))
++                                .into_item(),
++                        ]
++                    }
+                     GridHighlightedLink::Hyperlink { uri, .. } => {
+                         // OSC 8 hyperlink right-click. "Copy link" copies the
+                         // URI verbatim; "Open link" dispatches through
+@@ -19198,12 +19225,10 @@ impl TerminalView {
+         };
+ 
+         match link {
+-            #[cfg(feature = "local_fs")]
++            #[cfg(feature = "file_links")]
+             GridHighlightedLink::File(link) if link.contains(position) => {
+-                let link = link.get_inner();
+-                if let Some(path) = link.absolute_path() {
+-                    self.open_file_path(path, link.line_and_column_num, ctx);
+-                }
++                let link = link.get_inner().clone();
++                self.open_file_link(&link, ctx);
+             }
+             GridHighlightedLink::Url(url) if url.contains(position) => {
+                 let uri = self
+@@ -27859,7 +27884,12 @@ impl TypedActionView for TerminalView {
+             ShowInFileExplorer(path) => {
+                 send_telemetry_from_ctx!(TelemetryEvent::ShowInFileExplorer, ctx);
+ 
++                #[cfg(feature = "local_fs")]
+                 ctx.open_file_path_in_explorer(path);
++                // The web build can't reach the OS file manager; the host reveals the path in
++                // its own explorer (VS Code's Explorer).
++                #[cfg(not(feature = "local_fs"))]
++                crate::platform::wasm::reveal_file_in_host(&path.to_string_lossy());
+             }
+             OpenFileInWarp(path) => {
+                 self.open_file_in_warp(path.clone(), ctx);
+diff --git a/app/src/terminal/view/link_detection.rs b/app/src/terminal/view/link_detection.rs
+index 1efac8e..0b65c7d 100644
+--- a/app/src/terminal/view/link_detection.rs
++++ b/app/src/terminal/view/link_detection.rs
+@@ -11,12 +11,10 @@ use crate::terminal::model::index::Point;
+ use crate::terminal::model::terminal_model::{WithinBlock, WithinModel};
+ 
+ cfg_if::cfg_if! {
+-    if #[cfg(feature = "local_fs")] {
++    if #[cfg(feature = "file_links")] {
+         use crate::{
+             terminal::model::grid::grid_handler,
+-            terminal::ShellLaunchData,
+-            util::file::{FileLink, absolute_path_if_valid, ShellPathType},
+-            util::openable_file_type::FileTarget,
++            util::file_link::FileLink,
+         };
+         use std::path::PathBuf;
+         use unicode_general_category::{get_general_category, GeneralCategory};
+@@ -26,27 +24,35 @@ cfg_if::cfg_if! {
+     }
+ }
+ 
+-#[cfg(feature = "local_fs")]
+-use warp_errors::report_error;
++cfg_if::cfg_if! {
++    if #[cfg(feature = "local_fs")] {
++        use crate::{
++            terminal::ShellLaunchData,
++            util::file::{absolute_path_if_valid, ShellPathType},
++            util::openable_file_type::FileTarget,
++        };
++        use warp_errors::report_error;
++    }
++}
+ 
+ use super::{FindLinkArg, TerminalEditor};
+ 
+ // "a/" and "b/" are prefixes specific to Git Diff
+-#[cfg(feature = "local_fs")]
++#[cfg(feature = "file_links")]
+ const PREFIXES_TO_REMOVE: [&str; 2] = ["a/", "b/"];
+ 
+ /// "@" is a suffix that can be added to symlinks. It appears in Git Bash's default configuration
+ /// for `ls`.
+-#[cfg(feature = "local_fs")]
++#[cfg(feature = "file_links")]
+ const SUFFIXES_TO_REMOVE: [&str; 1] = ["@"];
+ 
+-#[cfg(feature = "local_fs")]
++#[cfg(feature = "file_links")]
+ struct TrimmedSentencePunctuation<'a> {
+     path: &'a str,
+     removed_width: usize,
+ }
+ 
+-#[cfg(feature = "local_fs")]
++#[cfg(feature = "file_links")]
+ fn is_trailing_sentence_punctuation(c: char) -> bool {
+     if c == '.' {
+         return true;
+@@ -75,7 +81,7 @@ fn is_trailing_sentence_punctuation(c: char) -> bool {
+ /// Returns `None` when there is no trailing sentence punctuation, or when a
+ /// trailing period is part of a `.`/`..` path component (e.g. `.`, `..`, `foo/.`,
+ /// `foo/..`), which are legitimate path segments and must be preserved.
+-#[cfg(feature = "local_fs")]
++#[cfg(feature = "file_links")]
+ fn path_without_trailing_sentence_punctuation(
+     path: &str,
+ ) -> Option<TrimmedSentencePunctuation<'_>> {
+@@ -116,7 +122,7 @@ fn path_without_trailing_sentence_punctuation(
+ #[derive(Debug, Clone)]
+ pub enum GridHighlightedLink {
+     Url(WithinModel<Link>),
+-    #[cfg(feature = "local_fs")]
++    #[cfg(feature = "file_links")]
+     File(WithinModel<FileLink>),
+     /// OSC 8 hyperlink span. Carries the URI directly because — unlike `Url`
+     /// — it isn't recoverable from the cell text.
+@@ -130,7 +136,7 @@ impl GridHighlightedLink {
+     pub fn contains(&self, position: &WithinModel<Point>) -> bool {
+         match self {
+             GridHighlightedLink::Url(url) => url.contains(position),
+-            #[cfg(feature = "local_fs")]
++            #[cfg(feature = "file_links")]
+             GridHighlightedLink::File(file_link) => file_link.contains(position),
+             GridHighlightedLink::Hyperlink { link, .. } => link.contains(position),
+         }
+@@ -138,17 +144,12 @@ impl GridHighlightedLink {
+ 
+     pub fn tooltip_text(&self) -> &'static str {
+         match &self {
+-            #[cfg(feature = "local_fs")]
+-            GridHighlightedLink::File(file_link)
+-                if file_link
+-                    .get_inner()
+-                    .absolute_path()
+-                    .map(|path| path.is_dir())
+-                    .unwrap_or(false) =>
++            #[cfg(feature = "file_links")]
++            GridHighlightedLink::File(file_link) if file_link.get_inner().is_dir =>
+             {
+                 "Open folder"
+             }
+-            #[cfg(feature = "local_fs")]
++            #[cfg(feature = "file_links")]
+             GridHighlightedLink::File(_) => "Open file",
+             GridHighlightedLink::Url(_) => "Open link",
+             GridHighlightedLink::Hyperlink { .. } => "Open link",
+@@ -165,7 +166,7 @@ impl Serialize for GridHighlightedLink {
+             GridHighlightedLink::Url(_) => {
+                 serializer.serialize_unit_variant("HighlightedLink", 0, "Url")
+             }
+-            #[cfg(feature = "local_fs")]
++            #[cfg(feature = "file_links")]
+             GridHighlightedLink::File(_) => {
+                 serializer.serialize_unit_variant("HighlightedLink", 1, "File")
+             }
+@@ -182,7 +183,7 @@ impl TryFrom<GridHighlightedLink> for Link {
+     fn try_from(value: GridHighlightedLink) -> Result<Self, Self::Error> {
+         match value {
+             GridHighlightedLink::Url(WithinModel::AltScreen(url)) => Ok(url),
+-            #[cfg(feature = "local_fs")]
++            #[cfg(feature = "file_links")]
+             GridHighlightedLink::File(WithinModel::AltScreen(file_link)) => Ok(file_link.link),
+             GridHighlightedLink::Hyperlink {
+                 link: WithinModel::AltScreen(link),
+@@ -201,7 +202,7 @@ impl TryFrom<GridHighlightedLink> for WithinBlock<Link> {
+     fn try_from(value: GridHighlightedLink) -> Result<Self, Self::Error> {
+         match value {
+             GridHighlightedLink::Url(WithinModel::BlockList(url)) => Ok(url),
+-            #[cfg(feature = "local_fs")]
++            #[cfg(feature = "file_links")]
+             GridHighlightedLink::File(WithinModel::BlockList(file_link)) => {
+                 Ok(file_link.map(|file_link| file_link.link))
+             }
+@@ -281,7 +282,7 @@ impl HighlightedLinkOption {
+                         .set_smart_select_override(link.range.clone());
+                 }
+             },
+-            #[cfg(feature = "local_fs")]
++            #[cfg(feature = "file_links")]
+             GridHighlightedLink::File(within_model) => match within_model {
+                 WithinModel::BlockList(within_block) => {
+                     let point_range = WithinBlock::new(
+@@ -468,7 +469,7 @@ impl super::TerminalView {
+         self.last_hover_fragment_boundary = Some(new_fragment_boundary);
+     }
+ 
+-    #[cfg_attr(not(feature = "local_fs"), allow(unused_variables))]
++    #[cfg_attr(not(feature = "file_links"), allow(unused_variables))]
+     pub(super) fn handle_find_link(
+         &mut self,
+         find_link_arg: FindLinkArg,
+@@ -485,11 +486,11 @@ impl super::TerminalView {
+             .as_ref()
+             .is_some_and(|url| url.contains(&position))
+         {
+-            #[cfg_attr(not(feature = "local_fs"), allow(clippy::needless_return))]
++            #[cfg_attr(not(feature = "file_links"), allow(clippy::needless_return))]
+             return;
+         }
+ 
+-        #[cfg(feature = "local_fs")]
++        #[cfg(feature = "file_links")]
+         self.scan_for_file_path(position, from_editor, ctx);
+     }
+ 
+@@ -503,13 +504,8 @@ impl super::TerminalView {
+         ctx.notify();
+ 
+         match link {
+-            #[cfg(feature = "local_fs")]
+-            GridHighlightedLink::File(link) => {
+-                let link = link.get_inner();
+-                if let Some(path) = link.absolute_path() {
+-                    self.open_file_path(path.clone(), link.line_and_column_num, ctx);
+-                }
+-            }
++            #[cfg(feature = "file_links")]
++            GridHighlightedLink::File(link) => self.open_file_link(link.get_inner(), ctx),
+             GridHighlightedLink::Url(url) => {
+                 let uri = self
+                     .model
+@@ -557,9 +553,18 @@ impl super::TerminalView {
+     }
+ }
+ 
+-// A collection of link detection functions that are only valid on platforms
+-// where we can spawn a local tty.
+-#[cfg(feature = "local_fs")]
++/// A path to check for a possible file link, with the grid range it would highlight.
++#[cfg(feature = "file_links")]
++struct PathCandidate {
++    path: CleanPathResult,
++    range: std::ops::RangeInclusive<Point>,
++    /// Index into the possible paths the candidate came from.
++    possible_path_index: usize,
++}
++
++// Detecting file paths in terminal output. Natively the paths are checked on the local file
++// system; on the web (remote_tty) the host app checks them.
++#[cfg(feature = "file_links")]
+ impl super::TerminalView {
+     /// Scans the terminal model at the given position to see if it is
+     /// contained within a path that should be linkified.
+@@ -569,53 +574,18 @@ impl super::TerminalView {
+         from_editor: TerminalEditor,
+         ctx: &mut ViewContext<Self>,
+     ) {
+-        // For AltScreen we scan for relative path with the current working directory.
+-        // For BlockList we scan for relative path with the pwd of the hovered block.
+-        let pwd_to_scan_for = match position {
+-            WithinModel::AltScreen(_) => self.pwd_if_local(ctx),
+-            WithinModel::BlockList(inner) => self
+-                .model
+-                .lock()
+-                .block_list()
+-                .block_at(inner.block_index)
+-                .filter(|block| !self.is_block_considered_remote(block.session_id(), None, ctx)) // Don't scan for file links if the block is on remote sessions
+-                .and_then(|block| block.pwd().map(String::from)),
+-        };
+-
+-        match pwd_to_scan_for {
++        match self.file_link_working_directory(position, ctx) {
+             // Check if we are hovering on any file path. Don't scan for file path
+             // if user is hovering from an editor like vim or nano.
+             Some(path) if matches!(from_editor, TerminalEditor::No) => {
+-                let possible_paths = self.model.lock().possible_file_paths_at_point(position);
++                let possible_paths: Vec<_> = self
++                    .model
++                    .lock()
++                    .possible_file_paths_at_point(position)
++                    .collect();
+                 let max_columns = self.size_info.columns;
+-                let shell_launch_data = self
+-                    .active_block_session_id()
+-                    .and_then(|active_session_id| self.sessions.as_ref(ctx).get(active_session_id))
+-                    .and_then(|active_session| active_session.launch_data().cloned());
+-
+-                // Using the thread builder instead of ctx.spawn here so that the previous
+-                // scanning job will be dropped once there is a new scanning job created.
+-                let (tx, rx) = futures::channel::oneshot::channel();
+-                self.file_link_scanning_join_handle = std::thread::Builder::new()
+-                    .name("Compute file paths".into())
+-                    .spawn(move || {
+-                        let paths = Self::compute_valid_paths(
+-                            &path,
+-                            possible_paths,
+-                            max_columns,
+-                            shell_launch_data,
+-                        );
+-                        let _ = tx.send(paths);
+-                    })
+-                    .map_err(|e| {
+-                        report_error!(anyhow::Error::new(e).context("Unable to spawn thread"));
+-                    })
+-                    .ok();
+-
+-                let _ = ctx.spawn(
+-                    async move { rx.await.ok().flatten() },
+-                    Self::handle_file_link_completed,
+-                );
++                let candidates = Self::path_candidates(&possible_paths, max_columns);
++                self.validate_path_candidates(path, possible_paths, candidates, ctx);
+             }
+             _ if self.highlighted_link.take(&mut self.model.lock()).is_some() => {
+                 ctx.reset_cursor();
+@@ -625,15 +595,68 @@ impl super::TerminalView {
+         };
+     }
+ 
+-    fn compute_valid_paths(
+-        working_directory: &str,
+-        possible_paths: impl Iterator<Item = WithinModel<grid_handler::PossiblePath>>,
++    /// The directory relative paths at `position` are relative to.
++    #[cfg(feature = "local_fs")]
++    fn file_link_working_directory(
++        &self,
++        position: WithinModel<Point>,
++        ctx: &mut ViewContext<Self>,
++    ) -> Option<String> {
++        // For AltScreen we scan for relative path with the current working directory.
++        // For BlockList we scan for relative path with the pwd of the hovered block.
++        match position {
++            WithinModel::AltScreen(_) => self.pwd_if_local(ctx),
++            WithinModel::BlockList(inner) => self
++                .model
++                .lock()
++                .block_list()
++                .block_at(inner.block_index)
++                .filter(|block| !self.is_block_considered_remote(block.session_id(), None, ctx)) // Don't scan for file links if the block is on remote sessions
++                .and_then(|block| block.pwd().map(String::from)),
++        }
++    }
++
++    /// The directory relative paths at `position` are relative to. Every session counts as
++    /// remote over the remote PTY, so this skips the local-session checks; the host resolves
++    /// paths on the machine the shell runs on.
++    #[cfg(not(feature = "local_fs"))]
++    fn file_link_working_directory(
++        &self,
++        position: WithinModel<Point>,
++        _ctx: &mut ViewContext<Self>,
++    ) -> Option<String> {
++        let model = self.model.lock();
++        let block_list = model.block_list();
++        match position {
++            WithinModel::AltScreen(_) => block_list.active_block().pwd().map(String::from),
++            WithinModel::BlockList(inner) => block_list
++                .block_at(inner.block_index)
++                .and_then(|block| block.pwd().map(String::from)),
++        }
++    }
++
++    /// The paths to check, in order of preference, for each possible path (longest first): the
++    /// path without trailing sentence punctuation, the path as is, then without a Git diff
++    /// prefix (`a/`, `b/`) or a symlink suffix (`@`).
++    fn path_candidates(
++        possible_paths: &[WithinModel<grid_handler::PossiblePath>],
+         max_columns: usize,
+-        shell_launch_data: Option<ShellLaunchData>,
+-    ) -> Option<GridHighlightedLink> {
+-        let mut link = None;
+-        'path_loop: for within_model_possible_path in possible_paths {
++    ) -> Vec<PathCandidate> {
++        let mut candidates = vec![];
++        for (possible_path_index, within_model_possible_path) in possible_paths.iter().enumerate()
++        {
+             let possible_path = within_model_possible_path.get_inner();
++            let line_and_column_num = possible_path.path.line_and_column_num;
++            let mut push = |path: &str, range: std::ops::RangeInclusive<Point>| {
++                candidates.push(PathCandidate {
++                    path: CleanPathResult {
++                        path: path.into(),
++                        line_and_column_num,
++                    },
++                    range,
++                    possible_path_index,
++                });
++            };
+ 
+             // A file path at the end of a sentence often captures trailing prose
+             // punctuation (e.g. `notes/README.md.` or `notes/README.md，`). Try the
+@@ -645,131 +668,148 @@ impl super::TerminalView {
+             if let Some(trimmed_path) =
+                 path_without_trailing_sentence_punctuation(&possible_path.path.path)
+             {
+-                let trimmed_cleaned_path = CleanPathResult {
+-                    path: trimmed_path.path.into(),
+-                    line_and_column_num: possible_path.path.line_and_column_num,
+-                };
+-                if let Some(absolute_path) = absolute_path_if_valid(
+-                    &trimmed_cleaned_path,
+-                    ShellPathType::ShellNative(working_directory.to_string()),
+-                    shell_launch_data.as_ref(),
+-                ) {
+-                    let new_end_point = possible_path
+-                        .range
+-                        .end()
+-                        .wrapping_sub(max_columns, trimmed_path.removed_width);
+-                    link = Some(Self::create_valid_link(
+-                        absolute_path,
+-                        trimmed_cleaned_path.line_and_column_num,
+-                        *possible_path.range.start()..=new_end_point,
+-                        &within_model_possible_path,
+-                    ));
+-                    break 'path_loop;
+-                }
++                let new_end_point = possible_path
++                    .range
++                    .end()
++                    .wrapping_sub(max_columns, trimmed_path.removed_width);
++                push(
++                    trimmed_path.path,
++                    *possible_path.range.start()..=new_end_point,
++                );
+             }
+ 
+-            // We want to check if the clean path result is a valid path and get the canonical
+-            // absolute path back.
+-            let absolute_path = absolute_path_if_valid(
+-                &possible_path.path,
+-                ShellPathType::ShellNative(working_directory.to_string()),
+-                shell_launch_data.as_ref(),
+-            );
+-
+-            if let Some(absolute_path) = absolute_path {
+-                link = Some(Self::create_valid_link(
+-                    absolute_path,
+-                    possible_path.path.line_and_column_num,
+-                    possible_path.range.clone(),
+-                    &within_model_possible_path,
+-                ));
+-                break;
+-            }
++            push(&possible_path.path.path, possible_path.range.clone());
+ 
+             for prefix in PREFIXES_TO_REMOVE {
+                 if let Some(new_possible_path) = possible_path.path.path.strip_prefix(prefix) {
+-                    let new_possible_cleaned_path = CleanPathResult {
+-                        path: new_possible_path.into(),
+-                        line_and_column_num: possible_path.path.line_and_column_num,
+-                    };
+-                    let absolute_path = absolute_path_if_valid(
+-                        &new_possible_cleaned_path,
+-                        ShellPathType::ShellNative(working_directory.to_string()),
+-                        shell_launch_data.as_ref(),
++                    let new_start_point = possible_path
++                        .range
++                        .start()
++                        .wrapping_add(max_columns, prefix.len());
++                    push(
++                        new_possible_path,
++                        new_start_point..=*possible_path.range.end(),
+                     );
+-
+-                    // check if new_possible_path is valid
+-                    if let Some(absolute_path) = absolute_path {
+-                        let new_start_point = possible_path
+-                            .range
+-                            .start()
+-                            .wrapping_add(max_columns, prefix.len());
+-
+-                        link = Some(Self::create_valid_link(
+-                            absolute_path,
+-                            new_possible_cleaned_path.line_and_column_num,
+-                            new_start_point..=*possible_path.range.end(),
+-                            &within_model_possible_path,
+-                        ));
+-
+-                        // break outer_loop
+-                        break 'path_loop;
+-                    }
+                 }
+             }
+ 
+             for suffix in SUFFIXES_TO_REMOVE {
+                 if let Some(new_possible_path) = possible_path.path.path.strip_suffix(suffix) {
+-                    let new_possible_cleaned_path = CleanPathResult {
+-                        path: new_possible_path.into(),
+-                        line_and_column_num: possible_path.path.line_and_column_num,
+-                    };
+-                    let absolute_path = absolute_path_if_valid(
+-                        &new_possible_cleaned_path,
+-                        ShellPathType::ShellNative(working_directory.to_string()),
+-                        shell_launch_data.as_ref(),
++                    let new_end_point = possible_path
++                        .range
++                        .end()
++                        .wrapping_sub(max_columns, suffix.len());
++                    push(
++                        new_possible_path,
++                        *possible_path.range.start()..=new_end_point,
+                     );
+-
+-                    // check if new_possible_path is valid
+-                    if let Some(absolute_path) = absolute_path {
+-                        let new_end_point = possible_path
+-                            .range
+-                            .end()
+-                            .wrapping_sub(max_columns, suffix.len());
+-
+-                        link = Some(Self::create_valid_link(
+-                            absolute_path,
+-                            new_possible_cleaned_path.line_and_column_num,
+-                            *possible_path.range.start()..=new_end_point,
+-                            &within_model_possible_path,
+-                        ));
+-
+-                        // break outer_loop
+-                        break 'path_loop;
+-                    }
+                 }
+             }
+         }
++        candidates
++    }
+ 
+-        link.map(GridHighlightedLink::File)
++    /// Highlights the first candidate that exists, checking on a thread.
++    #[cfg(feature = "local_fs")]
++    fn validate_path_candidates(
++        &mut self,
++        working_directory: String,
++        possible_paths: Vec<WithinModel<grid_handler::PossiblePath>>,
++        candidates: Vec<PathCandidate>,
++        ctx: &mut ViewContext<Self>,
++    ) {
++        let shell_launch_data = self
++            .active_block_session_id()
++            .and_then(|active_session_id| self.sessions.as_ref(ctx).get(active_session_id))
++            .and_then(|active_session| active_session.launch_data().cloned());
++
++        // Using the thread builder instead of ctx.spawn here so that the previous
++        // scanning job will be dropped once there is a new scanning job created.
++        let (tx, rx) = futures::channel::oneshot::channel();
++        self.file_link_scanning_join_handle = std::thread::Builder::new()
++            .name("Compute file paths".into())
++            .spawn(move || {
++                let link = candidates.into_iter().find_map(|candidate| {
++                    let absolute_path = absolute_path_if_valid(
++                        &candidate.path,
++                        ShellPathType::ShellNative(working_directory.clone()),
++                        shell_launch_data.as_ref(),
++                    )?;
++                    let is_dir = absolute_path.is_dir();
++                    Some(Self::create_valid_link(
++                        absolute_path,
++                        is_dir,
++                        candidate,
++                        &possible_paths,
++                    ))
++                });
++                let _ = tx.send(link.map(GridHighlightedLink::File));
++            })
++            .map_err(|e| {
++                report_error!(anyhow::Error::new(e).context("Unable to spawn thread"));
++            })
++            .ok();
++
++        let _ = ctx.spawn(
++            async move { rx.await.ok().flatten() },
++            Self::handle_file_link_completed,
++        );
++    }
++
++    /// Highlights the first candidate that exists, as checked by the host app. A newer scan
++    /// aborts the previous one.
++    #[cfg(not(feature = "local_fs"))]
++    fn validate_path_candidates(
++        &mut self,
++        working_directory: String,
++        possible_paths: Vec<WithinModel<grid_handler::PossiblePath>>,
++        candidates: Vec<PathCandidate>,
++        ctx: &mut ViewContext<Self>,
++    ) {
++        if let Some(handle) = self.file_link_scan_handle.take() {
++            handle.abort();
++        }
++        let paths = candidates
++            .iter()
++            .map(|candidate| candidate.path.path.clone())
++            .collect();
++        self.file_link_scan_handle = Some(ctx.spawn(
++            crate::platform::wasm::resolve_paths_in_host(working_directory, paths),
++            move |me, resolved, ctx| {
++                let link = candidates
++                    .into_iter()
++                    .zip(resolved)
++                    .find_map(|(candidate, resolved)| {
++                        let resolved = resolved?;
++                        Some(Self::create_valid_link(
++                            PathBuf::from(resolved.absolute_path),
++                            resolved.is_dir,
++                            candidate,
++                            &possible_paths,
++                        ))
++                    });
++                me.handle_file_link_completed(link.map(GridHighlightedLink::File), ctx);
++            },
++        ));
+     }
+ 
+     fn create_valid_link(
+         absolute_path: PathBuf,
+-        line_and_column_num: Option<LineAndColumnArg>,
+-        path_range: std::ops::RangeInclusive<Point>,
+-        possible_path: &WithinModel<grid_handler::PossiblePath>,
++        is_dir: bool,
++        candidate: PathCandidate,
++        possible_paths: &[WithinModel<grid_handler::PossiblePath>],
+     ) -> WithinModel<FileLink> {
+         let inner_link = FileLink {
+             link: Link {
+-                range: path_range,
++                range: candidate.range,
+                 is_empty: false,
+             },
+             absolute_path,
+-            line_and_column_num,
++            is_dir,
++            line_and_column_num: candidate.path.line_and_column_num,
+         };
+ 
+-        match possible_path {
++        match &possible_paths[candidate.possible_path_index] {
+             WithinModel::AltScreen(_) => WithinModel::AltScreen(inner_link),
+             WithinModel::BlockList(inner) => {
+                 WithinModel::BlockList(WithinBlock::new(inner_link, inner.block_index, inner.grid))
+@@ -794,8 +834,28 @@ impl super::TerminalView {
+             ctx.notify();
+         }
+     }
++
++    /// Opens a detected file path: natively per the user's editor settings, on the web in the
++    /// host's editor.
++    pub(super) fn open_file_link(&mut self, link: &FileLink, ctx: &mut ViewContext<Self>) {
++        #[cfg(feature = "local_fs")]
++        self.open_file_path(link.absolute_path.clone(), link.line_and_column_num, ctx);
++        #[cfg(not(feature = "local_fs"))]
++        {
++            let _ = ctx;
++            let (line, column) = link
++                .line_and_column_num
++                .map(|arg| (Some(arg.line_num as u32), arg.column_num.map(|c| c as u32)))
++                .unwrap_or((None, None));
++            crate::platform::wasm::open_file_in_host(
++                &link.absolute_path.to_string_lossy(),
++                line,
++                column,
++            );
++        }
++    }
+ }
+ 
+-#[cfg(all(test, feature = "local_fs"))]
++#[cfg(all(test, feature = "file_links"))]
+ #[path = "link_detection_tests.rs"]
+ mod tests;
+diff --git a/app/src/util/file.rs b/app/src/util/file.rs
+index 5218cb5..4f4417e 100644
+--- a/app/src/util/file.rs
++++ b/app/src/util/file.rs
+@@ -4,12 +4,11 @@ use std::{fs, io};
+ 
+ #[cfg(windows)]
+ use warp_util::path::is_network_resource;
+-use warp_util::path::{CleanPathResult, LineAndColumnArg};
++use warp_util::path::CleanPathResult;
+ 
+ pub use self::external_editor::{open_file_path_in_external_editor, open_file_path_with_editor};
++pub use super::file_link::FileLink;
+ use crate::terminal::ShellLaunchData;
+-use crate::terminal::model::grid::grid_handler::{ContainsPoint, Link};
+-use crate::terminal::model::index::Point;
+ 
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub enum FilePathType {
+@@ -103,26 +102,6 @@ impl FilePathType {
+     }
+ }
+ 
+-#[derive(Clone, Debug, PartialEq, Eq)]
+-pub struct FileLink {
+-    pub link: Link,
+-    /// This path has been converted (if needed) into a native path from the shell.
+-    pub absolute_path: PathBuf,
+-    pub line_and_column_num: Option<LineAndColumnArg>,
+-}
+-
+-impl FileLink {
+-    pub fn absolute_path(&self) -> Option<PathBuf> {
+-        Some(self.absolute_path.clone())
+-    }
+-}
+-
+-impl ContainsPoint for FileLink {
+-    fn contains(&self, point: Point) -> bool {
+-        self.link.contains(point)
+-    }
+-}
+-
+ /// Creates the file at the given path if it doesn't already exist, opening it
+ /// in write mode. If any directories in the path are missing, those are created
+ /// as well.
+diff --git a/app/src/util/file_link.rs b/app/src/util/file_link.rs
+new file mode 100644
+index 0000000..81fcd69
+--- /dev/null
++++ b/app/src/util/file_link.rs
+@@ -0,0 +1,28 @@
++use std::path::PathBuf;
++
++use warp_util::path::LineAndColumnArg;
++
++use crate::terminal::model::grid::grid_handler::{ContainsPoint, Link};
++use crate::terminal::model::index::Point;
++
++/// A file path detected in terminal output.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct FileLink {
++    pub link: Link,
++    /// This path has been converted (if needed) into a native path from the shell.
++    pub absolute_path: PathBuf,
++    pub is_dir: bool,
++    pub line_and_column_num: Option<LineAndColumnArg>,
++}
++
++impl FileLink {
++    pub fn absolute_path(&self) -> Option<PathBuf> {
++        Some(self.absolute_path.clone())
++    }
++}
++
++impl ContainsPoint for FileLink {
++    fn contains(&self, point: Point) -> bool {
++        self.link.contains(point)
++    }
++}
+diff --git a/app/src/util/mod.rs b/app/src/util/mod.rs
+index 2ed14db..da28977 100644
+--- a/app/src/util/mod.rs
++++ b/app/src/util/mod.rs
+@@ -4,6 +4,8 @@ pub mod color;
+ pub mod extensions;
+ #[cfg(feature = "local_fs")]
+ pub mod file;
++#[cfg(feature = "file_links")]
++pub mod file_link;
+ pub mod git;
+ pub mod image;
+ pub(crate) mod link_detection;

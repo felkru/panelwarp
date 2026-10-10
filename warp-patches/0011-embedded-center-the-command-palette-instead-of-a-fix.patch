@@ -1,0 +1,74 @@
+From 8b70edbccbec0af0fcd96701bfc1cd100c8b7454 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 13:54:27 -0700
+Subject: [PATCH 11/49] embedded: center the command palette instead of a fixed
+ top offset
+
+Short host panels (e.g. VS Code's bottom panel) pushed the palette out of view.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/search/command_palette/view.rs | 21 ++++++++++++++-------
+ app/src/voltron.rs                     |  3 ++-
+ 2 files changed, 16 insertions(+), 8 deletions(-)
+
+diff --git a/app/src/search/command_palette/view.rs b/app/src/search/command_palette/view.rs
+index 3d3da6f..78b29e4 100644
+--- a/app/src/search/command_palette/view.rs
++++ b/app/src/search/command_palette/view.rs
+@@ -185,8 +185,10 @@ impl warpui::View for View {
+         }
+         palette.add_child(Shrinkable::new(1., body).finish());
+ 
+-        EventHandler::new(
+-            Align::new(
++        // Embedded (`remote_tty`) builds often live in short panels (e.g. VS Code's bottom panel), where
++        // a fixed top offset pushes the palette out of view, so center it there instead.
++        let embedded = cfg!(feature = "remote_tty");
++        let palette_align = Align::new(
+                 Dismiss::new(
+                     Container::new(
+                         ConstrainedBox::new(palette.finish())
+@@ -197,7 +199,8 @@ impl warpui::View for View {
+                     .with_background(theme.surface_2())
+                     .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
+                     .with_border(Border::all(1.0).with_border_fill(theme.outline()))
+-                    .with_margin_top(117.)
++                    .with_margin_top(if embedded { 12. } else { 117. })
++                    .with_margin_bottom(if embedded { 12. } else { 0. })
+                     .with_padding_bottom(10.)
+                     .with_drop_shadow(*styles::DROP_SHADOW)
+                     .finish(),
+@@ -205,10 +208,14 @@ impl warpui::View for View {
+                 .on_dismiss(|ctx, _app| ctx.dispatch_typed_action(Action::Close))
+                 .prevent_interaction_with_other_elements()
+                 .finish(),
+-            )
+-            .top_center()
+-            .finish(),
+-        )
++            );
++        let palette_align = if embedded {
++            palette_align
++        } else {
++            palette_align.top_center()
++        };
++
++        EventHandler::new(palette_align.finish())
+         .on_modifier_state_changed(|ctx, _, key_code, state| {
+             if matches!(key_code, KeyCode::ControlLeft | KeyCode::ControlRight) {
+                 ctx.dispatch_typed_action(Action::CtrlPressed(matches!(state, KeyState::Pressed)));
+diff --git a/app/src/voltron.rs b/app/src/voltron.rs
+index 44fdfa5..7e5fed1 100644
+--- a/app/src/voltron.rs
++++ b/app/src/voltron.rs
+@@ -547,7 +547,8 @@ impl View for Voltron {
+                 .with_max_height(402.)
+                 .finish(),
+         )
+-        .with_margin_top(117.)
++        // Embedded (`remote_tty`) builds often live in short panels; see the command palette.
++        .with_margin_top(if cfg!(feature = "remote_tty") { 12. } else { 117. })
+         .with_background(theme.surface_2())
+         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
+         .with_border(Border::all(1.0).with_border_fill(theme.outline()));

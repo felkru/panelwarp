@@ -1,0 +1,52 @@
+From f7c294303f042c790334b3f8b041b7ae54f3b5c9 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 18:13:20 -0700
+Subject: [PATCH 21/49] Size the block toolbelt background to the buttons that
+ are shown
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/terminal/block_list_element.rs | 22 ++++++++++++++++++----
+ 1 file changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/app/src/terminal/block_list_element.rs b/app/src/terminal/block_list_element.rs
+index f1ab38e..3f351f8 100644
+--- a/app/src/terminal/block_list_element.rs
++++ b/app/src/terminal/block_list_element.rs
+@@ -4114,10 +4114,24 @@ impl Element for BlockListElement {
+                             self.overflow_offset,
+                         );
+ 
+-                    let block_menu_rect_origin = block_menu_items_start_origin - vec2f(4., 4.);
++                    // The background only spans the buttons that are shown: some are hidden
++                    // (e.g. Ask AI and Save as workflow in embedded builds), and their slots stay
++                    // empty, so it starts at the left-most shown button.
++                    let first_shown_button_offset = if self.ask_ai_assistant_button.is_some() {
++                        0.
++                    } else if self.save_as_workflow_button.is_some() {
++                        30.
++                    } else if self.filter_elements.contains_key(block_index) {
++                        60.
++                    } else {
++                        90.
++                    };
++                    let block_menu_rect_origin = block_menu_items_start_origin
++                        + vec2f(first_shown_button_offset, 0.)
++                        - vec2f(4., 4.);
+                     let block_menu_rect_size = vec2f(
+-                        124., // 4 icons of 26px width + 4px padding between icons x3 + 4px left padding + 4px right padding
+-                        34.,  // 26px height icons + 4px top padding + 4px bottom padding
++                        124. - first_shown_button_offset, // 4 icons of 26px width + 4px padding between icons x3 + 4px left padding + 4px right padding
++                        34., // 26px height icons + 4px top padding + 4px bottom padding
+                     );
+ 
+                     // We add in increments of 30 as each icon is 26px wide + 4px gap between icons
+@@ -4172,7 +4186,7 @@ impl Element for BlockListElement {
+                         let display_rprompt = block.should_display_rprompt(&size)
+                             && !self.label_elements.contains_key(block_index);
+                         if is_block_hovered
+-                            && (prompt_max_x > block_menu_items_start_origin.x()
++                            && (prompt_max_x > block_menu_rect_origin.x() + 4.
+                                 || display_rprompt
+                                 || block.is_background())
+                         {

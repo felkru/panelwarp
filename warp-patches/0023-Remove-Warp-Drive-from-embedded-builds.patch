@@ -1,0 +1,88 @@
+From b5896cca171338e99dfc9e55b429be5d1d2a7e4b Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 18:26:19 -0700
+Subject: [PATCH 23/49] Remove Warp Drive from embedded builds
+
+Warp Drive needs a Warp account, which embedded (remote_tty) builds never
+have: it is now never available there, its keybindings and openers are
+inert, and the Appearance page drops the tools-panel toggles (the panel
+only shows Agents in embedded builds).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/drive/settings.rs                | 6 +++++-
+ app/src/settings_view/appearance_page.rs | 3 ++-
+ app/src/workspace/mod.rs                 | 2 +-
+ app/src/workspace/view.rs                | 6 ++++++
+ 4 files changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/app/src/drive/settings.rs b/app/src/drive/settings.rs
+index 9867337..14d72dd 100644
+--- a/app/src/drive/settings.rs
++++ b/app/src/drive/settings.rs
+@@ -44,9 +44,13 @@ impl WarpDriveSettings {
+     /// This is intentionally separate from the stored `enable_warp_drive`
+     /// preference. Logged-out and anonymous users can retain their onboarding
+     /// preference so Warp Drive appears automatically after signup, while the
+-    /// feature remains unavailable until then.
++    /// feature remains unavailable until then. Never available in embedded builds.
+     pub fn is_warp_drive_available(app: &warpui::AppContext) -> bool {
+         use warpui::SingletonEntity as _;
++        // Embedded (`remote_tty`) builds have no Warp account, so no Warp Drive.
++        if cfg!(feature = "remote_tty") {
++            return false;
++        }
+         !FeatureFlag::SkipFirebaseAnonymousUser.is_enabled()
+             || !crate::auth::AuthStateProvider::as_ref(app)
+                 .get()
+diff --git a/app/src/settings_view/appearance_page.rs b/app/src/settings_view/appearance_page.rs
+index aa29b2b..e893179 100644
+--- a/app/src/settings_view/appearance_page.rs
++++ b/app/src/settings_view/appearance_page.rs
+@@ -1430,7 +1430,8 @@ impl AppearanceSettingsPageView {
+             tools_panel_widgets.push(Box::new(ToolsPanelGlobalSearchWidget::default()));
+         }
+         tools_panel_widgets.push(Box::new(ToolsPanelWarpDriveWidget::default()));
+-        if !tools_panel_widgets.is_empty() {
++        // Embedded (`remote_tty`) builds always show only the Agents panel there.
++        if !tools_panel_widgets.is_empty() && !cfg!(feature = "remote_tty") {
+             categories.push(Category::new("Tools panel", tools_panel_widgets));
+         }
+ 
+diff --git a/app/src/workspace/mod.rs b/app/src/workspace/mod.rs
+index 6a26753..49a5868 100644
+--- a/app/src/workspace/mod.rs
++++ b/app/src/workspace/mod.rs
+@@ -1203,7 +1203,7 @@ pub fn init(app: &mut AppContext) {
+                 query: None,
+             },
+         )
+-        .with_context_predicate(id!("Workspace"))
++        .with_context_predicate(id!("Workspace") & id!(flags::ENABLE_WARP_DRIVE))
+         .with_custom_action(CustomAction::SearchDrive),
+     ]);
+ 
+diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
+index 326c70b..5470663 100644
+--- a/app/src/workspace/view.rs
++++ b/app/src/workspace/view.rs
+@@ -9516,6 +9516,9 @@ impl Workspace {
+         explicit_user_action: bool,
+         ctx: &mut ViewContext<Self>,
+     ) {
++        if !WarpDriveSettings::is_warp_drive_enabled(ctx) {
++            return;
++        }
+         // Closing all left panels will also close warp drive so we need to retrieve
+         // whether warp drive was open first, and toggle based on the initial value.
+         let was_warp_drive_open = self.current_workspace_state.is_warp_drive_open;
+@@ -14792,6 +14795,9 @@ impl Workspace {
+     }
+ 
+     fn open_warp_drive_palette(&mut self, ctx: &mut ViewContext<Self>) {
++        if !WarpDriveSettings::is_warp_drive_enabled(ctx) {
++            return;
++        }
+         self.palette.update(ctx, |view, ctx| {
+             view.reset(ctx);
+             view.set_active_query_filter(QueryFilter::Drive, ctx);

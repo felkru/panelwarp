@@ -1,0 +1,23 @@
+From e2a6d5efcf94eb4f4f8fcfb1ff5c6a7436c1793d Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 13:46:05 -0700
+Subject: [PATCH 08/49] deps: lockfile entry for wasm-bindgen-futures in the
+ app crate
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Cargo.lock | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index b82093d..4f57ea0 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -15521,6 +15521,7 @@ dependencies = [
+  "warpui_core",
+  "warpui_extras",
+  "wasm-bindgen",
++ "wasm-bindgen-futures",
+  "watcher",
+  "web-sys",
+  "websocket",

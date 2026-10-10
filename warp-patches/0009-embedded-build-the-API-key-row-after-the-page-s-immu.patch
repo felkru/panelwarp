@@ -1,0 +1,46 @@
+From c6f6fa577ee66859b839dc2b594f91d2162825c3 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 13:46:41 -0700
+Subject: [PATCH 09/49] embedded: build the API key row after the page's
+ immutable settings borrow
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/settings_view/warp_agent_page.rs | 17 +++++++++--------
+ 1 file changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
+index 6cb8023..62ecc3a 100644
+--- a/app/src/settings_view/warp_agent_page.rs
++++ b/app/src/settings_view/warp_agent_page.rs
+@@ -2289,14 +2289,6 @@ impl WarpAgentPageView {
+         let ai_settings = AISettings::as_ref(ctx);
+ 
+         let mut categories: Vec<Category<Self>> = Vec::new();
+-        // Embedded (`remote_tty`) builds answer AI requests with the host app's own provider;
+-        // the key is entered here and stored by the host, never in Warp.
+-        if cfg!(feature = "remote_tty") {
+-            categories.push(Category::new(
+-                "AI provider",
+-                vec![Box::new(HostApiKeyWidget::new(ctx))],
+-            ));
+-        }
+ 
+         if ai_settings
+             .intelligent_autosuggestions_enabled_internal
+@@ -2367,6 +2359,15 @@ impl WarpAgentPageView {
+             ],
+         ));
+ 
++        // Embedded (`remote_tty`) builds answer AI requests with the host app's own provider;
++        // the key is entered here and stored by the host, never in Warp. Listed first.
++        if cfg!(feature = "remote_tty") {
++            categories.insert(
++                0,
++                Category::new("AI provider", vec![Box::new(HostApiKeyWidget::new(ctx))]),
++            );
++        }
++
+         let page_view_handle = ctx.handle();
+         categories.push(Category::with_header(
+             CategoryHeader::new("Custom Inference").with_trailing_element(

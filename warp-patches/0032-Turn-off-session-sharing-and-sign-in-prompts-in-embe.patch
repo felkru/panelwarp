@@ -1,0 +1,105 @@
+From cad75f454d2362a7e9a0270059d45e792787f8f4 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 01:57:42 -0700
+Subject: [PATCH 32/49] Turn off session sharing and sign-in prompts in
+ embedded builds
+
+Embedded builds have no Warp account, so session sharing (creating, viewing, agent sessions) is
+off: the flags are dropped at startup, and neither a cached server experiment nor the
+no-workspace tier policy turns creating shared sessions back on. Login-gated features, the
+Drive object limit and anonymous sign-up linking no longer open a sign-in modal.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/auth/auth_manager.rs              | 10 ++++++++++
+ app/src/features.rs                       |  7 +++++--
+ app/src/server/experiments/mod.rs         |  3 ++-
+ app/src/workspaces/user_workspaces/mod.rs |  3 ++-
+ 4 files changed, 19 insertions(+), 4 deletions(-)
+
+diff --git a/app/src/auth/auth_manager.rs b/app/src/auth/auth_manager.rs
+index 53a67f7..7d0cc77 100644
+--- a/app/src/auth/auth_manager.rs
++++ b/app/src/auth/auth_manager.rs
+@@ -733,6 +733,10 @@ impl AuthManager {
+         auth_view_variant: AuthViewVariant,
+         ctx: &mut ModelContext<Self>,
+     ) {
++        // Embedded builds have no Warp accounts, so there's nothing to sign in to.
++        if cfg!(feature = "remote_tty") {
++            return;
++        }
+         if self.auth_state.is_anonymous_or_logged_out() {
+             send_telemetry_from_ctx!(
+                 TelemetryEvent::AnonymousUserAttemptLoginGatedFeature { feature },
+@@ -743,6 +747,9 @@ impl AuthManager {
+     }
+ 
+     pub fn anonymous_user_hit_drive_object_limit(&self, ctx: &mut ModelContext<Self>) {
++        if cfg!(feature = "remote_tty") {
++            return;
++        }
+         if self.auth_state.is_anonymous_or_logged_out() {
+             send_telemetry_from_ctx!(TelemetryEvent::AnonymousUserHitCloudObjectLimit, ctx);
+             ctx.emit(AuthManagerEvent::AttemptedLoginGatedFeature {
+@@ -756,6 +763,9 @@ impl AuthManager {
+         entrypoint: AnonymousUserSignupEntrypoint,
+         ctx: &mut ModelContext<Self>,
+     ) {
++        if cfg!(feature = "remote_tty") {
++            return;
++        }
+         let auth_client = self.auth_client.clone();
+         let _ = ctx.spawn(
+             async move { auth_client.fetch_new_custom_token().await },
+diff --git a/app/src/features.rs b/app/src/features.rs
+index 64bf9c6..ab0effc 100644
+--- a/app/src/features.rs
++++ b/app/src/features.rs
+@@ -531,13 +531,16 @@ fn enabled_features() -> HashSet<FeatureFlag> {
+         FeatureFlag::StoredScreenshots,
+     ]);
+ 
+-    // Embedded builds have no updates, changelog, crash reporting or usage events, and no CLI
+-    // agent rich input (its settings are hidden there).
++    // Embedded builds have no updates, changelog, crash reporting or usage events, no CLI agent
++    // rich input (its settings are hidden there) and no session sharing (it needs a Warp account).
+     #[cfg(feature = "remote_tty")]
+     flags.retain(|flag| {
+         !matches!(
+             flag,
+             FeatureFlag::Autoupdate
++                | FeatureFlag::CreatingSharedSessions
++                | FeatureFlag::ViewingSharedSessions
++                | FeatureFlag::AgentSharedSessions
+                 | FeatureFlag::Changelog
+                 | FeatureFlag::CrashReporting
+                 | FeatureFlag::CocoaSentry
+diff --git a/app/src/server/experiments/mod.rs b/app/src/server/experiments/mod.rs
+index a3c171b..6103bc9 100644
+--- a/app/src/server/experiments/mod.rs
++++ b/app/src/server/experiments/mod.rs
+@@ -68,7 +68,8 @@ impl ServerExperiment {
+     fn on_added_to(&self, _ctx: &mut AppContext) {
+         match self {
+             Self::SessionSharingExperiment => {
+-                FeatureFlag::CreatingSharedSessions.set_enabled(true);
++                // Embedded builds have no session sharing (it needs a Warp account).
++                FeatureFlag::CreatingSharedSessions.set_enabled(!cfg!(feature = "remote_tty"));
+             }
+             Self::SessionSharingControl => {
+                 FeatureFlag::CreatingSharedSessions.set_enabled(false);
+diff --git a/app/src/workspaces/user_workspaces/mod.rs b/app/src/workspaces/user_workspaces/mod.rs
+index 45bd8eb..11fca44 100644
+--- a/app/src/workspaces/user_workspaces/mod.rs
++++ b/app/src/workspaces/user_workspaces/mod.rs
+@@ -1689,7 +1689,8 @@ impl UserWorkspaces {
+ 
+     /// Updates whether or not session sharing is enabled based on the current team's tier policy.
+     fn update_session_sharing_enablement(&self, ctx: &AppContext) {
+-        if cfg!(any(test, feature = "integration_tests")) {
++        // Embedded builds have no session sharing (it needs a Warp account); see `features.rs`.
++        if cfg!(any(test, feature = "integration_tests", feature = "remote_tty")) {
+             return;
+         }
+ 

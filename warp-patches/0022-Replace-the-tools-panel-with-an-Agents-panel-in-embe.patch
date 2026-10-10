@@ -1,0 +1,1057 @@
+From 3aae901711c0b06837e0c0e71dff3ab0594582c1 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 18:23:47 -0700
+Subject: [PATCH 22/49] Replace the tools panel with an Agents panel in
+ embedded builds
+
+Lists the machine's recent Claude Code, Codex and Gemini CLI conversations
+from the host. Hovering a row streams a short summary from the host;
+clicking opens the conversation in the host or resumes it in a new tab.
+The toolbar button and header item become "Agents" with a stars icon.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/app_state.rs                          |   2 +
+ app/src/platform/wasm.rs                      | 100 +++-
+ app/src/workspace/header_toolbar_item.rs      |   2 +
+ app/src/workspace/view.rs                     |  20 +-
+ app/src/workspace/view/agent_conversations.rs | 513 ++++++++++++++++++
+ app/src/workspace/view/left_panel.rs          |  92 +++-
+ 6 files changed, 713 insertions(+), 16 deletions(-)
+ create mode 100644 app/src/workspace/view/agent_conversations.rs
+
+diff --git a/app/src/app_state.rs b/app/src/app_state.rs
+index d288cc8..6b38b86 100644
+--- a/app/src/app_state.rs
++++ b/app/src/app_state.rs
+@@ -314,6 +314,7 @@ pub enum LeftPanelDisplayedTab {
+     GlobalSearch,
+     WarpDrive,
+     ConversationListView,
++    AgentConversations,
+ }
+ 
+ impl From<ToolPanelView> for LeftPanelDisplayedTab {
+@@ -323,6 +324,7 @@ impl From<ToolPanelView> for LeftPanelDisplayedTab {
+             ToolPanelView::GlobalSearch { .. } => LeftPanelDisplayedTab::GlobalSearch,
+             ToolPanelView::WarpDrive => LeftPanelDisplayedTab::WarpDrive,
+             ToolPanelView::ConversationListView => LeftPanelDisplayedTab::ConversationListView,
++            ToolPanelView::AgentConversations => LeftPanelDisplayedTab::AgentConversations,
+         }
+     }
+ }
+diff --git a/app/src/platform/wasm.rs b/app/src/platform/wasm.rs
+index ef1c2bf..c349a2c 100644
+--- a/app/src/platform/wasm.rs
++++ b/app/src/platform/wasm.rs
+@@ -40,8 +40,11 @@ mod ffi {
+         pub fn record_command(kind: &str, json: &str) -> Result<(), JsValue>;
+ 
+         #[wasm_bindgen(js_name = "warpPanelConfirm", catch)]
+-        pub fn confirm(message: &str, detail: &str, confirm_label: &str)
+-            -> Result<js_sys::Promise, JsValue>;
++        pub fn confirm(
++            message: &str,
++            detail: &str,
++            confirm_label: &str,
++        ) -> Result<js_sys::Promise, JsValue>;
+ 
+         #[wasm_bindgen(js_name = "warpPanelGenerateCommands", catch)]
+         pub fn generate_commands(
+@@ -49,9 +52,86 @@ mod ffi {
+             context_json: Option<String>,
+             stage: &str,
+         ) -> Result<js_sys::Promise, JsValue>;
++
++        #[wasm_bindgen(js_name = "warpPanelAgentConversations", catch)]
++        pub fn agent_conversations() -> Result<js_sys::Promise, JsValue>;
++
++        #[wasm_bindgen(js_name = "warpPanelAgentConversationSummary", catch)]
++        pub fn agent_conversation_summary(
++            agent: &str,
++            id: &str,
++            on_text: &js_sys::Function,
++        ) -> Result<js_sys::Promise, JsValue>;
++
++        #[wasm_bindgen(js_name = "warpPanelOpenAgentConversation", catch)]
++        pub fn open_agent_conversation(agent: &str, id: &str) -> Result<js_sys::Promise, JsValue>;
+     }
+ }
+ 
++/// Lists recent coding-agent conversations (Claude Code, Codex, Gemini CLI) from anywhere on the
++/// machine via the host's `window.warpPanelAgentConversations()`, which resolves to a JSON array
++/// of `{agent, id, title, cwd, updatedAt}` (`updatedAt` in milliseconds since the epoch).
++/// Resolves to None if the host doesn't provide it or fails.
++pub async fn agent_conversations_from_host() -> Option<String> {
++    let promise = ffi::agent_conversations().ok()?;
++    wasm_bindgen_futures::JsFuture::from(promise)
++        .await
++        .ok()?
++        .as_string()
++}
++
++/// An update to a conversation summary streamed by the host.
++pub enum AgentConversationSummaryUpdate {
++    /// The summary so far (the whole text, not a delta).
++    Text(String),
++    Error(String),
++}
++
++/// Streams an AI summary of a coding-agent conversation from the host's
++/// `window.warpPanelAgentConversationSummary(agent, id, onText)`, which calls `onText` with the
++/// summary so far and resolves when it's complete (or rejects with an error message).
++pub fn agent_conversation_summary_from_host(
++    agent: &str,
++    id: &str,
++) -> futures::channel::mpsc::UnboundedReceiver<AgentConversationSummaryUpdate> {
++    use wasm_bindgen::closure::Closure;
++
++    let (tx, rx) = futures::channel::mpsc::unbounded();
++    let text_tx = tx.clone();
++    let on_text = Closure::<dyn FnMut(String)>::new(move |text: String| {
++        let _ = text_tx.unbounded_send(AgentConversationSummaryUpdate::Text(text));
++    });
++    match ffi::agent_conversation_summary(agent, id, on_text.as_ref().unchecked_ref()) {
++        Ok(promise) => wasm_bindgen_futures::spawn_local(async move {
++            if let Err(err) = wasm_bindgen_futures::JsFuture::from(promise).await {
++                let message = err
++                    .as_string()
++                    .unwrap_or_else(|| "summary failed".to_owned());
++                let _ = tx.unbounded_send(AgentConversationSummaryUpdate::Error(message));
++            }
++            // Dropping the callback and both senders ends the stream.
++            drop(on_text);
++        }),
++        Err(_) => {
++            let _ = tx.unbounded_send(AgentConversationSummaryUpdate::Error(
++                "not supported by the host".to_owned(),
++            ));
++        }
++    }
++    rx
++}
++
++/// Asks the host to open a coding-agent conversation. Claude Code conversations open in the host
++/// (VS Code: the Claude Code extension's editor tab) and this resolves to None; for agents that
++/// resume in a terminal it resolves to the command to run in a new Warp tab.
++pub async fn open_agent_conversation_in_host(agent: &str, id: &str) -> Option<String> {
++    let promise = ffi::open_agent_conversation(agent, id).ok()?;
++    wasm_bindgen_futures::JsFuture::from(promise)
++        .await
++        .ok()?
++        .as_string()
++}
++
+ #[derive(serde::Deserialize)]
+ struct HostGeneratedCommand {
+     command: String,
+@@ -80,7 +160,9 @@ pub async fn generate_commands_in_host(
+     Vec<crate::ai_assistant::AIGeneratedCommand>,
+     crate::ai_assistant::GenerateCommandsFromNaturalLanguageError,
+ > {
+-    use crate::ai_assistant::{AIGeneratedCommand, GenerateCommandsFromNaturalLanguageError as Error};
++    use crate::ai_assistant::{
++        AIGeneratedCommand, GenerateCommandsFromNaturalLanguageError as Error,
++    };
+ 
+     let context_json = ai_execution_context.and_then(|context| context.to_json_string());
+     let promise = ffi::generate_commands(&prompt, context_json, stage).map_err(|_| Error::Other)?;
+@@ -101,7 +183,10 @@ pub async fn generate_commands_in_host(
+             AIGeneratedCommand::new(
+                 c.command,
+                 c.description,
+-                c.parameters.into_iter().map(|p| (p.id, p.description)).collect(),
++                c.parameters
++                    .into_iter()
++                    .map(|p| (p.id, p.description))
++                    .collect(),
+             )
+         })
+         .collect())
+@@ -212,12 +297,13 @@ pub mod host_history {
+                 completed_ts: parse_ts(row.completed_ts),
+                 pwd: row.pwd,
+                 shell_host: match (row.shell, row.username, row.hostname) {
+-                    (Some(shell), Some(user), Some(hostname)) => ShellType::from_name(&shell)
+-                        .map(|shell_type| ShellHost {
++                    (Some(shell), Some(user), Some(hostname)) => {
++                        ShellType::from_name(&shell).map(|shell_type| ShellHost {
+                             shell_type,
+                             user,
+                             hostname,
+-                        }),
++                        })
++                    }
+                     _ => None,
+                 },
+                 session_id: row
+diff --git a/app/src/workspace/header_toolbar_item.rs b/app/src/workspace/header_toolbar_item.rs
+index 961c2dc..b247c8d 100644
+--- a/app/src/workspace/header_toolbar_item.rs
++++ b/app/src/workspace/header_toolbar_item.rs
+@@ -37,6 +37,7 @@ impl HeaderToolbarItemKind {
+     pub fn display_label(&self) -> &'static str {
+         match self {
+             Self::TabsPanel => "Tabs Panel",
++            Self::ToolsPanel if cfg!(feature = "remote_tty") => "Agents",
+             Self::ToolsPanel => "Tools Panel",
+             Self::AgentManagement => "Agent Management",
+             Self::CodeReview => "Code Review",
+@@ -47,6 +48,7 @@ impl HeaderToolbarItemKind {
+     pub fn icon(&self) -> Icon {
+         match self {
+             Self::TabsPanel => Icon::Menu,
++            Self::ToolsPanel if cfg!(feature = "remote_tty") => Icon::Stars,
+             Self::ToolsPanel => Icon::Tool2,
+             Self::AgentManagement => Icon::Grid,
+             Self::CodeReview => Icon::Diff,
+diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
+index d1b2931..326c70b 100644
+--- a/app/src/workspace/view.rs
++++ b/app/src/workspace/view.rs
+@@ -1,4 +1,5 @@
+ pub(crate) mod agent_cli_launch_modal;
++pub(crate) mod agent_conversations;
+ pub(crate) mod auto_handoff_sleep_modal;
+ mod build_plan_migration_modal;
+ pub(crate) mod chatgpt_plan_modal;
+@@ -4391,6 +4392,7 @@ impl Workspace {
+                 },
+                 LeftPanelDisplayedTab::WarpDrive => ToolPanelView::WarpDrive,
+                 LeftPanelDisplayedTab::ConversationListView => ToolPanelView::ConversationListView,
++                LeftPanelDisplayedTab::AgentConversations => ToolPanelView::AgentConversations,
+             };
+             lp.restore_active_view_from_snapshot(active_view, ctx);
+             lp.set_active_pane_group(pane_group.clone(), &self.working_directories_model, ctx);
+@@ -6792,6 +6794,11 @@ impl Workspace {
+                     ctx,
+                 );
+             }
++            LeftPanelEvent::RunCommandInNewTab(command) => {
++                self.add_terminal_tab(false, ctx);
++                self.insert_in_input(command.trim(), true, true, false, ctx);
++                ctx.notify();
++            }
+             LeftPanelEvent::SignInRequested => {
+                 self.open_require_login_modal(AuthViewVariant::RequireLoginCloseable, ctx);
+                 self.require_login_modal.update(ctx, |modal, ctx| {
+@@ -20752,6 +20759,7 @@ impl Workspace {
+                         ToolPanelView::GlobalSearch { .. } => "Global search",
+                         ToolPanelView::WarpDrive => "Warp Drive",
+                         ToolPanelView::ConversationListView => "Agent conversations",
++                        ToolPanelView::AgentConversations => "Agents",
+                     }
+                 } else {
+                     "Tools panel"
+@@ -20806,17 +20814,23 @@ impl Workspace {
+                 ToolPanelView::GlobalSearch { .. } => "Global search",
+                 ToolPanelView::WarpDrive => "Warp Drive",
+                 ToolPanelView::ConversationListView => "Agent conversations",
++                ToolPanelView::AgentConversations => "Agents",
+             }
+         } else {
+             "Tools panel"
+         };
++        let icon = if cfg!(feature = "remote_tty") {
++            icons::Icon::Stars
++        } else {
++            icons::Icon::Tool2
++        };
+ 
+         SavePosition::new(
+             Container::new(
+                 Align::new(
+                     self.render_tab_bar_icon_button(
+                         appearance,
+-                        icons::Icon::Tool2,
++                        icon,
+                         &self.mouse_states.tools_panel_icon,
+                         WorkspaceAction::ToggleLeftPanel,
+                         tooltip_text.to_string(),
+@@ -23998,6 +24012,10 @@ impl Workspace {
+ 
+     /// Computes the list of available left panel views based on current AI settings and feature flags.
+     fn compute_left_panel_views(ctx: &AppContext) -> Vec<ToolPanelView> {
++        // Embedded in a host app, the panel lists the machine's coding-agent conversations.
++        if cfg!(feature = "remote_tty") {
++            return vec![ToolPanelView::AgentConversations];
++        }
+         let mut views = vec![];
+         if cfg!(feature = "local_fs") && *CodeSettings::as_ref(ctx).show_project_explorer.value() {
+             views.push(ToolPanelView::ProjectExplorer);
+diff --git a/app/src/workspace/view/agent_conversations.rs b/app/src/workspace/view/agent_conversations.rs
+new file mode 100644
+index 0000000..cec0ed8
+--- /dev/null
++++ b/app/src/workspace/view/agent_conversations.rs
+@@ -0,0 +1,513 @@
++//! The Agents panel for embedded (`remote_tty`) builds: recent coding-agent conversations
++//! (Claude Code, Codex, Gemini CLI) from anywhere on the machine, as listed by the embedding host
++//! (the VS Code panel). Hovering a row streams a short AI summary of it from the host; clicking
++//! opens it in the host (Claude Code) or resumes it in a new tab (agents that run in a terminal).
++
++use std::collections::HashMap;
++use std::ops::Range;
++use std::sync::{Arc, Mutex};
++use std::time::Duration;
++
++use chrono::{DateTime, Utc};
++use pathfinder_geometry::vector::vec2f;
++use warp_core::ui::theme::Fill as ThemeFill;
++use warp_util::path::user_friendly_path;
++use warpui::r#async::{SpawnedFutureHandle, Timer};
++use warpui::elements::{
++    Border, ChildAnchor, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
++    DispatchEventResult, DropShadow, Element, EventHandler, Fill, Flex, Hoverable,
++    MainAxisAlignment, MainAxisSize, MouseInBehavior, MouseStateHandle, OffsetPositioning,
++    ParentAnchor, ParentElement, ParentOffsetBounds, Radius, ScrollStateHandle, Scrollable,
++    ScrollableElement, ScrollbarWidth, Shrinkable, Stack, Text, UniformList, UniformListState,
++};
++use warpui::platform::Cursor;
++use warpui::{AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext};
++
++use crate::ai::blocklist::CLAUDE_ORANGE;
++use crate::appearance::Appearance;
++use crate::terminal::cli_agent::GEMINI_BLUE;
++use crate::ui_components::icons::Icon;
++use crate::util::time_format::format_approx_duration_from_now_utc;
++use crate::workspace::header_toolbar_item::HeaderToolbarItemKind;
++use crate::workspace::tab_settings::TabSettings;
++
++/// How long the pointer has to rest on a row before its summary is requested, so sweeping over
++/// the list doesn't start a request per row.
++const SUMMARY_HOVER_DELAY: Duration = Duration::from_millis(450);
++const ICON_SIZE: f32 = 16.;
++const ICON_SPACING: f32 = 8.;
++const SUMMARY_MAX_WIDTH: f32 = 360.;
++
++#[derive(Clone, Debug, serde::Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct HostAgentConversation {
++    agent: String,
++    id: String,
++    title: String,
++    cwd: Option<String>,
++    /// Milliseconds since the epoch.
++    updated_at: f64,
++}
++
++impl HostAgentConversation {
++    /// Identifies this version of the conversation, so a summary is redone once it changes.
++    fn summary_key(&self) -> String {
++        format!("{}:{}:{}", self.agent, self.id, self.updated_at)
++    }
++
++    fn updated_at(&self) -> DateTime<Utc> {
++        DateTime::from_timestamp_millis(self.updated_at as i64).unwrap_or_default()
++    }
++}
++
++#[derive(Default)]
++struct Summary {
++    text: String,
++    error: Option<String>,
++}
++
++#[derive(Clone, Debug)]
++pub enum AgentConversationsAction {
++    SetHoveredIndex(usize),
++    ClearHoveredIndex,
++    Open(usize),
++}
++
++pub enum AgentConversationsEvent {
++    /// Run this command in a new terminal tab (resumes an agent that runs in a terminal).
++    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
++    RunInNewTab(String),
++}
++
++pub struct AgentConversationsView {
++    conversations: Vec<HostAgentConversation>,
++    loaded: bool,
++    row_states: Vec<MouseStateHandle>,
++    list_hover: MouseStateHandle,
++    list_state: UniformListState,
++    scroll_state: ScrollStateHandle,
++    hovered_index: Option<usize>,
++    summaries: HashMap<String, Summary>,
++    hover_delay: Option<SpawnedFutureHandle>,
++}
++
++impl AgentConversationsView {
++    pub fn new(_ctx: &mut ViewContext<Self>) -> Self {
++        Self {
++            conversations: Vec::new(),
++            loaded: false,
++            row_states: Vec::new(),
++            list_hover: Default::default(),
++            list_state: UniformListState::new(),
++            scroll_state: Arc::new(Mutex::new(Default::default())),
++            hovered_index: None,
++            summaries: HashMap::new(),
++            hover_delay: None,
++        }
++    }
++
++    /// Reloads the list from the host.
++    pub fn refresh(&mut self, ctx: &mut ViewContext<Self>) {
++        #[cfg(target_family = "wasm")]
++        ctx.spawn(
++            crate::platform::wasm::agent_conversations_from_host(),
++            |me, json, ctx| {
++                let conversations = json
++                    .and_then(|json| {
++                        serde_json::from_str::<Vec<HostAgentConversation>>(&json)
++                            .inspect_err(|err| log::warn!("Bad agent conversation list: {err}"))
++                            .ok()
++                    })
++                    .unwrap_or_default();
++                me.set_conversations(conversations, ctx);
++            },
++        );
++        #[cfg(not(target_family = "wasm"))]
++        self.set_conversations(Vec::new(), ctx);
++    }
++
++    fn set_conversations(
++        &mut self,
++        conversations: Vec<HostAgentConversation>,
++        ctx: &mut ViewContext<Self>,
++    ) {
++        self.row_states
++            .resize_with(conversations.len(), MouseStateHandle::default);
++        self.conversations = conversations;
++        self.loaded = true;
++        self.hovered_index = None;
++        self.cancel_hover_delay();
++        ctx.notify();
++    }
++
++    fn cancel_hover_delay(&mut self) {
++        if let Some(handle) = self.hover_delay.take() {
++            handle.abort();
++        }
++    }
++
++    fn set_hovered_index(&mut self, index: Option<usize>, ctx: &mut ViewContext<Self>) {
++        if self.hovered_index == index {
++            return;
++        }
++        self.hovered_index = index;
++        self.cancel_hover_delay();
++        if let Some(index) = index {
++            let already_requested = self.conversations.get(index).is_some_and(|conversation| {
++                self.summaries.contains_key(&conversation.summary_key())
++            });
++            if !already_requested {
++                self.hover_delay = Some(ctx.spawn(
++                    Timer::after(SUMMARY_HOVER_DELAY),
++                    move |me, _, ctx| {
++                        me.hover_delay = None;
++                        if me.hovered_index == Some(index) {
++                            me.request_summary(index, ctx);
++                        }
++                    },
++                ));
++            }
++        }
++        ctx.notify();
++    }
++
++    /// Starts streaming the summary of the conversation at `index` from the host. Finished and
++    /// in-progress summaries are kept, so each version of a conversation is summarized once.
++    fn request_summary(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
++        let Some(conversation) = self.conversations.get(index) else {
++            return;
++        };
++        let key = conversation.summary_key();
++        if self.summaries.contains_key(&key) {
++            return;
++        }
++        self.summaries.insert(key.clone(), Summary::default());
++        ctx.notify();
++
++        #[cfg(target_family = "wasm")]
++        {
++            use crate::platform::wasm::AgentConversationSummaryUpdate;
++
++            let updates = crate::platform::wasm::agent_conversation_summary_from_host(
++                &conversation.agent,
++                &conversation.id,
++            );
++            let item_key = key.clone();
++            ctx.spawn_stream_local(
++                updates,
++                move |me, update, ctx| {
++                    let summary = me.summaries.entry(item_key.clone()).or_default();
++                    match update {
++                        AgentConversationSummaryUpdate::Text(text) => summary.text = text,
++                        AgentConversationSummaryUpdate::Error(error) => summary.error = Some(error),
++                    }
++                    ctx.notify();
++                },
++                move |me, ctx| {
++                    // Forget failed summaries so hovering again retries.
++                    if me
++                        .summaries
++                        .get(&key)
++                        .is_some_and(|summary| summary.error.is_some())
++                    {
++                        me.summaries.remove(&key);
++                    }
++                    ctx.notify();
++                },
++            );
++        }
++    }
++
++    fn open(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
++        let Some(conversation) = self.conversations.get(index) else {
++            return;
++        };
++        #[cfg(target_family = "wasm")]
++        {
++            let agent = conversation.agent.clone();
++            let id = conversation.id.clone();
++            ctx.spawn(
++                async move {
++                    crate::platform::wasm::open_agent_conversation_in_host(&agent, &id).await
++                },
++                |_, command, ctx| {
++                    if let Some(command) = command.filter(|command| !command.is_empty()) {
++                        ctx.emit(AgentConversationsEvent::RunInNewTab(command));
++                    }
++                },
++            );
++        }
++        #[cfg(not(target_family = "wasm"))]
++        let _ = (conversation, ctx);
++    }
++}
++
++impl Entity for AgentConversationsView {
++    type Event = AgentConversationsEvent;
++}
++
++impl TypedActionView for AgentConversationsView {
++    type Action = AgentConversationsAction;
++
++    fn handle_action(&mut self, action: &Self::Action, ctx: &mut ViewContext<Self>) {
++        match action {
++            AgentConversationsAction::SetHoveredIndex(index) => {
++                self.set_hovered_index(Some(*index), ctx)
++            }
++            AgentConversationsAction::ClearHoveredIndex => self.set_hovered_index(None, ctx),
++            AgentConversationsAction::Open(index) => self.open(*index, ctx),
++        }
++    }
++}
++
++/// The agent's logo and the color to draw it in.
++fn agent_icon(agent: &str, appearance: &Appearance) -> (Icon, ThemeFill) {
++    let theme = appearance.theme();
++    match agent {
++        "claude" => (Icon::ClaudeLogo, ThemeFill::Solid(CLAUDE_ORANGE)),
++        "gemini" => (Icon::GeminiLogo, ThemeFill::Solid(GEMINI_BLUE)),
++        // OpenAI's brand color is black, which disappears on dark themes.
++        "codex" => (Icon::OpenAILogo, theme.main_text_color(theme.background())),
++        _ => (Icon::Stars, theme.sub_text_color(theme.background())),
++    }
++}
++
++fn render_summary_popover(summary: &Summary, appearance: &Appearance) -> Box<dyn Element> {
++    let theme = appearance.theme();
++    let (text, color) = match (&summary.error, summary.text.is_empty()) {
++        (Some(error), _) => (
++            format!("Couldn't summarize: {error}"),
++            theme.sub_text_color(theme.background()),
++        ),
++        (None, true) => (
++            "Summarizing…".to_owned(),
++            theme.sub_text_color(theme.background()),
++        ),
++        (None, false) => (
++            summary.text.clone(),
++            theme.main_text_color(theme.background()),
++        ),
++    };
++    Container::new(
++        ConstrainedBox::new(
++            Text::new(text, appearance.ui_font_family(), appearance.ui_font_size())
++                .with_color(color.into())
++                .finish(),
++        )
++        .with_max_width(SUMMARY_MAX_WIDTH)
++        .finish(),
++    )
++    .with_uniform_padding(10.)
++    .with_background(theme.surface_2())
++    .with_border(Border::all(1.).with_border_fill(theme.outline()))
++    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
++    .with_drop_shadow(DropShadow::default())
++    .finish()
++}
++
++fn render_row(
++    conversation: &HostAgentConversation,
++    index: usize,
++    is_hovered: bool,
++    summary: Option<&Summary>,
++    popover_opens_right: bool,
++    mouse_state: MouseStateHandle,
++    app: &AppContext,
++) -> Box<dyn Element> {
++    let appearance = Appearance::as_ref(app);
++    let theme = appearance.theme();
++    let font_family = appearance.ui_font_family();
++    let font_size = appearance.ui_font_size();
++
++    let (icon, icon_color) = agent_icon(&conversation.agent, appearance);
++    let icon = ConstrainedBox::new(icon.to_warpui_icon(icon_color).finish())
++        .with_width(ICON_SIZE)
++        .with_height(ICON_SIZE)
++        .finish();
++    let title = Text::new_inline(conversation.title.clone(), font_family, font_size + 1.)
++        .with_color(theme.main_text_color(theme.background()).into())
++        .finish();
++    let title_row = Flex::row()
++        .with_cross_axis_alignment(CrossAxisAlignment::Center)
++        .with_spacing(ICON_SPACING)
++        .with_child(icon)
++        .with_child(Shrinkable::new(1.0, title).finish())
++        .finish();
++
++    let home_dir = dirs::home_dir().and_then(|path| path.to_str().map(String::from));
++    let cwd = conversation
++        .cwd
++        .as_deref()
++        .map(|cwd| user_friendly_path(cwd, home_dir.as_deref()).into_owned())
++        .unwrap_or_default();
++    let sub_color = theme.sub_text_color(theme.background());
++    let bottom_row = Container::new(
++        Flex::row()
++            .with_main_axis_size(MainAxisSize::Max)
++            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
++            .with_cross_axis_alignment(CrossAxisAlignment::End)
++            .with_child(
++                Shrinkable::new(
++                    1.0,
++                    Text::new_inline(cwd, font_family, font_size - 1.)
++                        .with_color(sub_color.into())
++                        .finish(),
++                )
++                .finish(),
++            )
++            .with_child(
++                Text::new_inline(
++                    format_approx_duration_from_now_utc(conversation.updated_at()),
++                    font_family,
++                    font_size - 2.,
++                )
++                .with_color(sub_color.into())
++                .finish(),
++            )
++            .finish(),
++    )
++    .with_padding_left(ICON_SIZE + ICON_SPACING)
++    .finish();
++
++    let content = Flex::column()
++        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
++        .with_spacing(2.)
++        .with_child(title_row)
++        .with_child(bottom_row)
++        .finish();
++
++    let popover = summary
++        .filter(|_| is_hovered)
++        .map(|summary| render_summary_popover(summary, appearance));
++    let row = Hoverable::new(mouse_state, move |_| {
++        let mut container = Container::new(content)
++            .with_horizontal_padding(12.)
++            .with_vertical_padding(6.);
++        if is_hovered {
++            container = container.with_background(theme.surface_overlay_1());
++        }
++        let mut stack = Stack::new().with_child(container.finish());
++        if let Some(popover) = popover {
++            let (parent_anchor, child_anchor, offset_x) = if popover_opens_right {
++                (ParentAnchor::MiddleRight, ChildAnchor::MiddleLeft, 4.)
++            } else {
++                (ParentAnchor::MiddleLeft, ChildAnchor::MiddleRight, -4.)
++            };
++            stack.add_positioned_overlay_child(
++                popover,
++                OffsetPositioning::offset_from_parent(
++                    vec2f(offset_x, 0.),
++                    ParentOffsetBounds::WindowByPosition,
++                    parent_anchor,
++                    child_anchor,
++                ),
++            );
++        }
++        stack.finish()
++    })
++    .with_cursor(Cursor::PointingHand)
++    .on_click(move |ctx, _, _| {
++        ctx.dispatch_typed_action(AgentConversationsAction::Open(index));
++    })
++    .finish();
++
++    EventHandler::new(row)
++        .on_mouse_in(
++            move |ctx, _, _| {
++                ctx.dispatch_typed_action(AgentConversationsAction::SetHoveredIndex(index));
++                DispatchEventResult::PropagateToParent
++            },
++            Some(MouseInBehavior {
++                fire_on_synthetic_events: false,
++                fire_when_covered: false,
++            }),
++        )
++        .finish()
++}
++
++impl View for AgentConversationsView {
++    fn ui_name() -> &'static str {
++        "AgentConversationsView"
++    }
++
++    fn render(&self, app: &AppContext) -> Box<dyn Element> {
++        let appearance = Appearance::as_ref(app);
++        let theme = appearance.theme();
++
++        if self.conversations.is_empty() {
++            let message = if self.loaded {
++                "No recent Claude Code, Codex or Gemini CLI conversations."
++            } else {
++                "Loading…"
++            };
++            return Container::new(
++                Text::new(
++                    message,
++                    appearance.ui_font_family(),
++                    appearance.ui_font_size(),
++                )
++                .with_color(theme.sub_text_color(theme.background()).into())
++                .finish(),
++            )
++            .with_horizontal_padding(12.)
++            .with_vertical_padding(8.)
++            .finish();
++        }
++
++        // Open the summary towards the middle of the window.
++        let popover_opens_right = TabSettings::as_ref(app)
++            .header_toolbar_chip_selection
++            .left_items()
++            .contains(&HeaderToolbarItemKind::ToolsPanel);
++        let rows: Vec<Box<dyn Element>> = self
++            .conversations
++            .iter()
++            .enumerate()
++            .map(|(index, conversation)| {
++                let is_hovered = self.hovered_index == Some(index);
++                render_row(
++                    conversation,
++                    index,
++                    is_hovered,
++                    self.summaries.get(&conversation.summary_key()),
++                    popover_opens_right,
++                    self.row_states[index].clone(),
++                    app,
++                )
++            })
++            .collect();
++        let rows = Arc::new(Mutex::new(rows.into_iter().map(Some).collect::<Vec<_>>()));
++        let list = UniformList::new(
++            self.list_state.clone(),
++            self.conversations.len(),
++            move |range: Range<usize>, _: &AppContext| {
++                let mut rows = rows.lock().expect("rows lock poisoned");
++                range
++                    .filter_map(|index| rows.get_mut(index).and_then(Option::take))
++                    .collect::<Vec<_>>()
++                    .into_iter()
++            },
++        )
++        .finish_scrollable();
++
++        let scrollable = Scrollable::vertical(
++            self.scroll_state.clone(),
++            list,
++            ScrollbarWidth::Auto,
++            theme.nonactive_ui_detail().into(),
++            theme.active_ui_detail().into(),
++            Fill::None,
++        )
++        .with_overlayed_scrollbar()
++        .finish();
++
++        Hoverable::new(self.list_hover.clone(), move |_| scrollable)
++            .on_hover(|is_hovered, ctx, _, _| {
++                if !is_hovered {
++                    ctx.dispatch_typed_action(AgentConversationsAction::ClearHoveredIndex);
++                }
++            })
++            .with_skip_synthetic_hover_out()
++            .finish()
++    }
++}
+diff --git a/app/src/workspace/view/left_panel.rs b/app/src/workspace/view/left_panel.rs
+index 59d75d7..60d3e03 100644
+--- a/app/src/workspace/view/left_panel.rs
++++ b/app/src/workspace/view/left_panel.rs
+@@ -9,7 +9,7 @@ use warp_util::path::LineAndColumnArg;
+ use warpui::elements::{
+     Align, ChildView, ConstrainedBox, Container, CrossAxisAlignment, DragBarSide, Element, Empty,
+     Flex, MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Resizable,
+-    ResizableStateHandle, Shrinkable, resizable_state_handle,
++    ResizableStateHandle, Shrinkable, Text, resizable_state_handle,
+ };
+ use warpui::fonts::Weight;
+ use warpui::platform::Cursor;
+@@ -57,6 +57,9 @@ use crate::util::openable_file_type::{
+     EditorLayout, is_markdown_file, resolve_file_target_with_editor_choice,
+ };
+ use crate::workspace::WorkspaceAction;
++use crate::workspace::view::agent_conversations::{
++    AgentConversationsEvent, AgentConversationsView,
++};
+ use crate::workspace::view::conversation_list::view::{
+     ConversationListView, Event as ConversationListViewEvent,
+ };
+@@ -77,6 +80,7 @@ struct MouseStateHandles {
+     conversation_list_view_button: MouseStateHandle,
+     global_search_button: MouseStateHandle,
+     warp_drive_button: MouseStateHandle,
++    agent_conversations_button: MouseStateHandle,
+     sign_in_button: MouseStateHandle,
+ }
+ 
+@@ -86,6 +90,7 @@ pub enum LeftPanelAction {
+     GlobalSearch { entry_focus: GlobalSearchEntryFocus },
+     WarpDrive,
+     ConversationListView,
++    AgentConversations,
+     SignIn,
+ }
+ 
+@@ -99,9 +104,9 @@ pub(crate) enum ToolPanelAvailability {
+ impl ToolPanelView {
+     fn availability(self, app: &AppContext) -> ToolPanelAvailability {
+         match self {
+-            ToolPanelView::ProjectExplorer | ToolPanelView::GlobalSearch { .. } => {
+-                ToolPanelAvailability::Available
+-            }
++            ToolPanelView::ProjectExplorer
++            | ToolPanelView::GlobalSearch { .. }
++            | ToolPanelView::AgentConversations => ToolPanelAvailability::Available,
+             ToolPanelView::WarpDrive => {
+                 if WarpDriveSettings::is_warp_drive_available(app) {
+                     ToolPanelAvailability::Available
+@@ -143,14 +148,20 @@ pub enum LeftPanelEvent {
+         terminal_view_id: Option<warpui::EntityId>,
+     },
+     SignInRequested,
++    /// Run this command in a new terminal tab.
++    RunCommandInNewTab(String),
+ }
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub enum ToolPanelView {
+     ProjectExplorer,
+-    GlobalSearch { entry_focus: GlobalSearchEntryFocus },
++    GlobalSearch {
++        entry_focus: GlobalSearchEntryFocus,
++    },
+     WarpDrive,
+     ConversationListView,
++    /// Recent coding-agent conversations listed by the embedding host (`remote_tty`).
++    AgentConversations,
+ }
+ 
+ /// Encapsulates the active view state to enforce that all mutations go through
+@@ -190,6 +201,12 @@ mod active_view_state {
+             left_panel.on_conversation_list_view_visibility_changed(true, ctx);
+         }
+ 
++        if new_view == ToolPanelView::AgentConversations
++            && previous != ToolPanelView::AgentConversations
++        {
++            left_panel.refresh_agent_conversations(ctx);
++        }
++
+         left_panel.update_active_file_tree_subscription_state(ctx);
+     }
+ }
+@@ -218,6 +235,7 @@ pub struct LeftPanelView {
+     close_button_mouse_state: MouseStateHandle,
+     warp_drive_view: ViewHandle<DrivePanel>,
+     conversation_list_view: ViewHandle<ConversationListView>,
++    agent_conversations_view: ViewHandle<AgentConversationsView>,
+     active_view: active_view_state::ActiveViewState,
+     toolbelt_buttons: Vec<ToolbeltButtonConfig>,
+     active_pane_group: Option<WeakViewHandle<PaneGroup>>,
+@@ -270,11 +288,14 @@ impl LeftPanelView {
+             (
+                 ToolPanelView::ProjectExplorer
+                 | ToolPanelView::GlobalSearch { .. }
+-                | ToolPanelView::WarpDrive,
++                | ToolPanelView::WarpDrive
++                | ToolPanelView::AgentConversations,
+                 ToolPanelAvailability::RequiresAi,
+             )
+             | (
+-                ToolPanelView::ProjectExplorer | ToolPanelView::GlobalSearch { .. },
++                ToolPanelView::ProjectExplorer
++                | ToolPanelView::GlobalSearch { .. }
++                | ToolPanelView::AgentConversations,
+                 ToolPanelAvailability::RequiresAccount,
+             )
+             | (_, ToolPanelAvailability::Available) => {
+@@ -353,6 +374,15 @@ impl LeftPanelView {
+         };
+         let warp_drive_view = ctx.add_typed_action_view(DrivePanel::new);
+         let conversation_list_view = ctx.add_typed_action_view(ConversationListView::new);
++        let agent_conversations_view = ctx.add_typed_action_view(AgentConversationsView::new);
++        ctx.subscribe_to_view(
++            &agent_conversations_view,
++            |_me, _, event, ctx| match event {
++                AgentConversationsEvent::RunInNewTab(command) => {
++                    ctx.emit(LeftPanelEvent::RunCommandInNewTab(command.clone()));
++                }
++            },
++        );
+ 
+         ctx.subscribe_to_view(&warp_drive_view, |_me, _, event, ctx| {
+             ctx.emit(LeftPanelEvent::WarpDrive(event.clone()));
+@@ -375,7 +405,12 @@ impl LeftPanelView {
+             }
+         });
+ 
+-        let active_view = views.first().copied().unwrap_or(ToolPanelView::WarpDrive);
++        let default_view = if cfg!(feature = "remote_tty") {
++            ToolPanelView::AgentConversations
++        } else {
++            ToolPanelView::WarpDrive
++        };
++        let active_view = views.first().copied().unwrap_or(default_view);
+         let toolbelt_buttons = views
+             .iter()
+             .map(|view| Self::create_toolbelt_button_config(view, ctx))
+@@ -468,6 +503,7 @@ impl LeftPanelView {
+             close_button_mouse_state: Default::default(),
+             warp_drive_view,
+             conversation_list_view,
++            agent_conversations_view,
+             active_view: active_view_state::new(active_view),
+             toolbelt_buttons,
+             active_pane_group: None,
+@@ -610,6 +646,15 @@ impl LeftPanelView {
+                     tooltip_keybinding_names,
+                 }
+             }
++            ToolPanelView::AgentConversations => ToolbeltButtonConfig {
++                icon: Icon::Stars,
++                active_icon: None,
++                tooltip_text: "Agents".to_string(),
++                action: LeftPanelAction::AgentConversations,
++                render_with_active_state: false,
++                tooltip_keybinding: None,
++                tooltip_keybinding_names: Vec::new(),
++            },
+         }
+     }
+ 
+@@ -874,6 +919,7 @@ impl LeftPanelView {
+                     view.on_left_panel_focused(ctx);
+                 });
+             }
++            ToolPanelView::AgentConversations => ctx.focus(&self.agent_conversations_view),
+         }
+     }
+ 
+@@ -1040,6 +1086,9 @@ impl LeftPanelView {
+                 LeftPanelAction::ConversationListView => {
+                     self.active_view.get() == ToolPanelView::ConversationListView
+                 }
++                LeftPanelAction::AgentConversations => {
++                    self.active_view.get() == ToolPanelView::AgentConversations
++                }
+                 LeftPanelAction::SignIn => false,
+             };
+         }
+@@ -1186,6 +1235,9 @@ impl LeftPanelView {
+                     send_telemetry_from_ctx!(TelemetryEvent::ConversationListViewOpened, ctx);
+                 }
+             }
++            LeftPanelAction::AgentConversations => {
++                active_view_state::set(self, ToolPanelView::AgentConversations, ctx);
++            }
+             LeftPanelAction::SignIn => {
+                 ctx.emit(LeftPanelEvent::SignInRequested);
+             }
+@@ -1196,10 +1248,18 @@ impl LeftPanelView {
+         if ToolPanelView::ConversationListView == self.active_view.get() {
+             self.on_conversation_list_view_visibility_changed(is_now_open, ctx);
+         }
++        if is_now_open && ToolPanelView::AgentConversations == self.active_view.get() {
++            self.refresh_agent_conversations(ctx);
++        }
+ 
+         self.update_active_file_tree_subscription_state(ctx);
+     }
+ 
++    fn refresh_agent_conversations(&self, ctx: &mut ViewContext<Self>) {
++        self.agent_conversations_view
++            .update(ctx, |view, ctx| view.refresh(ctx));
++    }
++
+     fn deactivate_file_tree_view_for_pane_group(
+         &self,
+         pane_group_id: warpui::EntityId,
+@@ -1294,6 +1354,7 @@ impl View for LeftPanelView {
+                 }
+                 ToolPanelView::WarpDrive => ctx.focus(&self.warp_drive_view),
+                 ToolPanelView::ConversationListView => ctx.focus(&self.conversation_list_view),
++                ToolPanelView::AgentConversations => ctx.focus(&self.agent_conversations_view),
+             }
+         }
+     }
+@@ -1308,6 +1369,7 @@ impl View for LeftPanelView {
+                 .clone(),
+             self.mouse_state_handles.global_search_button.clone(),
+             self.mouse_state_handles.warp_drive_button.clone(),
++            self.mouse_state_handles.agent_conversations_button.clone(),
+         ];
+ 
+         // If there is only one button in the toolbelt row,
+@@ -1372,6 +1434,10 @@ impl View for LeftPanelView {
+                     Shrinkable::new(1.0, ChildView::new(&self.conversation_list_view).finish())
+                         .finish()
+                 }
++                ToolPanelView::AgentConversations => {
++                    Shrinkable::new(1.0, ChildView::new(&self.agent_conversations_view).finish())
++                        .finish()
++                }
+             }
+         };
+ 
+@@ -1380,6 +1446,16 @@ impl View for LeftPanelView {
+ 
+             let header_left = if let Some(row) = toolbelt_button_row {
+                 row
++            } else if active_view == ToolPanelView::AgentConversations {
++                // The only view, so name it in place of the toolbelt.
++                let theme = appearance.theme();
++                Text::new_inline(
++                    "Agents",
++                    appearance.ui_font_family(),
++                    appearance.ui_font_size() + 1.,
++                )
++                .with_color(theme.main_text_color(theme.background()).into())
++                .finish()
+             } else {
+                 Flex::row().finish()
+             };

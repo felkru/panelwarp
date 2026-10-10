@@ -1,0 +1,524 @@
+From 26680b50f08fe5c5a063afa3b3dbdba291f1e224 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 02:22:11 -0700
+Subject: [PATCH 33/49] Prompt Suggestions for a CLI coding agent in embedded
+ builds
+
+Embedded (remote_tty) builds have no Warp agent, so Prompt Suggestions now
+ask the host app (window.warpPanelPromptSuggestion) with Warp's own request,
+and accepting the chip starts the configured CLI coding agent in the
+terminal with the prompt as its last argument (host.ai.prompt_suggestions_agent,
+default "claude"). It's opt-in (host.ai.prompt_suggestions, off by default)
+and only runs while private routing is on, since it sends the command and
+its output. Warp's generic static prompts are skipped there.
+
+Warp's in-band commands no longer cancel a pending suggestion: they start
+right after each user command, so any host answer slower than a few hundred
+milliseconds was dropped.
+
+The "Prompt Suggestions" settings row becomes a real toggle plus the agent
+command; the planned-feature placeholder widget is removed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../blocklist/passive_suggestions/legacy.rs   |  10 +-
+ app/src/platform/wasm.rs                      |  17 +++
+ app/src/server/server_api.rs                  |  23 ++++
+ app/src/settings/ai.rs                        |  11 ++
+ app/src/settings/host_ai.rs                   |  20 +++
+ app/src/settings_view/ai_shared.rs            |  90 +-----------
+ app/src/settings_view/warp_agent_page.rs      | 128 +++++++++++++++++-
+ app/src/terminal/view.rs                      |  28 ++++
+ 8 files changed, 232 insertions(+), 95 deletions(-)
+
+diff --git a/app/src/ai/blocklist/passive_suggestions/legacy.rs b/app/src/ai/blocklist/passive_suggestions/legacy.rs
+index d1f03a0..03ab476 100644
+--- a/app/src/ai/blocklist/passive_suggestions/legacy.rs
++++ b/app/src/ai/blocklist/passive_suggestions/legacy.rs
+@@ -159,7 +159,12 @@ impl PassiveSuggestionsModel {
+ 
+     fn handle_model_event(&mut self, event: &ModelEvent, ctx: &mut ModelContext<Self>) {
+         match event {
+-            ModelEvent::AfterBlockStarted { .. } => {
++            // Warp's own in-band commands (completions, git status, ...) run right after a user
++            // command; they must not cancel the suggestion for it.
++            ModelEvent::AfterBlockStarted {
++                is_for_in_band_command: false,
++                ..
++            } => {
+                 self.abort_pending_requests(ctx);
+             }
+             ModelEvent::AfterBlockCompleted(after_block_completed_event) => {
+@@ -269,8 +274,11 @@ impl PassiveSuggestionsModel {
+             .to_owned();
+         let start_ts_ms = Utc::now().timestamp_millis();
+ 
++        // Embedded builds hand accepted prompts to a CLI agent, where Warp's generic static
++        // prompts ("Help me deploy my project...") aren't useful.
+         if let Some(suggestion) =
+             fetch_static_prompt_suggestion(&block_completed, &self.terminal_model)
++                .filter(|_| !cfg!(feature = "remote_tty"))
+         {
+             ctx.emit(PassiveSuggestionsEvent::PromptSuggestionsGenerated {
+                 prompt_suggestion: suggestion.clone(),
+diff --git a/app/src/platform/wasm.rs b/app/src/platform/wasm.rs
+index 43561bd..b64bd29 100644
+--- a/app/src/platform/wasm.rs
++++ b/app/src/platform/wasm.rs
+@@ -56,6 +56,9 @@ mod ffi {
+         #[wasm_bindgen(js_name = "warpPanelNextCommand", catch)]
+         pub fn next_command(request_json: &str) -> Result<js_sys::Promise, JsValue>;
+ 
++        #[wasm_bindgen(js_name = "warpPanelPromptSuggestion", catch)]
++        pub fn prompt_suggestion(request_json: &str) -> Result<js_sys::Promise, JsValue>;
++
+         #[wasm_bindgen(js_name = "warpPanelAgentConversations", catch)]
+         pub fn agent_conversations() -> Result<js_sys::Promise, JsValue>;
+ 
+@@ -209,6 +212,20 @@ pub async fn next_command_in_host(request_json: String) -> Result<Option<String>
+         .filter(|command| !command.is_empty()))
+ }
+ 
++/// Suggests a prompt for a CLI coding agent via the embedding host app's
++/// `window.warpPanelPromptSuggestion(requestJson)`, which gets Warp's prompt suggestion request
++/// as JSON and resolves to the prompt, or to null/empty when it has none.
++pub async fn prompt_suggestion_in_host(request_json: String) -> Result<Option<String>, String> {
++    let promise = ffi::prompt_suggestion(&request_json).map_err(|err| format!("{err:?}"))?;
++    let result = wasm_bindgen_futures::JsFuture::from(promise)
++        .await
++        .map_err(|err| err.as_string().unwrap_or_else(|| format!("{err:?}")))?;
++    Ok(result
++        .as_string()
++        .map(|prompt| prompt.trim().to_owned())
++        .filter(|prompt| !prompt.is_empty()))
++}
++
+ /// Asks the embedding host app to confirm an action with a modal dialog
+ /// (`window.warpPanelConfirm(message, detail, confirmLabel)`, resolving to a boolean). Resolves
+ /// to false if the host doesn't provide it or the user cancels.
+diff --git a/app/src/server/server_api.rs b/app/src/server/server_api.rs
+index 44e0ec0..04c17f6 100644
+--- a/app/src/server/server_api.rs
++++ b/app/src/server/server_api.rs
+@@ -1249,6 +1249,29 @@ impl ServerApi {
+         request: &GenerateAMQuerySuggestionsRequest,
+         team_scope: RequestTeamScope,
+     ) -> Result<generate_am_query_suggestions::GenerateAMQuerySuggestionsResponse, AIApiError> {
++        // Embedded builds ask the host app's AI provider for a CLI coding agent prompt.
++        #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
++        {
++            let _ = team_scope;
++            let request_json = serde_json::to_string(request).map_err(anyhow::Error::from)?;
++            let suggestion = crate::platform::wasm::prompt_suggestion_in_host(request_json)
++                .await
++                .map_err(|err| anyhow::anyhow!("host prompt suggestion failed: {err}"))?;
++            return Ok(
++                generate_am_query_suggestions::GenerateAMQuerySuggestionsResponse {
++                    id: uuid::Uuid::new_v4().to_string(),
++                    suggestion: suggestion.map(|query| {
++                        generate_am_query_suggestions::Suggestion::Simple(
++                            generate_am_query_suggestions::SimpleQuery {
++                                query,
++                                should_plan_task: false,
++                            },
++                        )
++                    }),
++                },
++            );
++        }
++        #[allow(unreachable_code)]
+         let auth_token = self.get_or_refresh_access_token().await?;
+ 
+         cfg_if::cfg_if! {
+diff --git a/app/src/settings/ai.rs b/app/src/settings/ai.rs
+index ba2ef99..a841720 100644
+--- a/app/src/settings/ai.rs
++++ b/app/src/settings/ai.rs
+@@ -2352,6 +2352,17 @@ impl AISettings {
+             && AppExecutionMode::as_ref(app).allows_active_ai()
+     }
+ 
++    /// Embedded builds: the host's fast model suggests a task for a CLI coding agent. It sends
++    /// command output, so it's opt-in and only runs with private routing.
++    #[cfg(feature = "remote_tty")]
++    pub fn is_prompt_suggestions_enabled(&self, app: &warpui::AppContext) -> bool {
++        let host = crate::settings::HostAiSettings::as_ref(app);
++        *host.prompt_suggestions
++            && *host.private_routing
++            && AppExecutionMode::as_ref(app).allows_active_ai()
++    }
++
++    #[cfg(not(feature = "remote_tty"))]
+     pub fn is_prompt_suggestions_enabled(&self, app: &warpui::AppContext) -> bool {
+         self.is_active_ai_enabled(app) && *self.prompt_suggestions_enabled_internal
+     }
+diff --git a/app/src/settings/host_ai.rs b/app/src/settings/host_ai.rs
+index 4630ee8..36a3015 100644
+--- a/app/src/settings/host_ai.rs
++++ b/app/src/settings/host_ai.rs
+@@ -122,6 +122,26 @@ define_settings_group!(HostAiSettings, settings: [
+         toml_path: "host.ai.next_command",
+         description: "Suggest the next command with the fast model after a command finishes. Sends recent commands and their output, so it only runs while private routing is on.",
+     },
++    prompt_suggestions: HostAiPromptSuggestions {
++        type: bool,
++        default: false,
++        supported_platforms: SupportedPlatforms::ALL,
++        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
++        surface: settings::SettingSurfaces::GUI,
++        private: false,
++        toml_path: "host.ai.prompt_suggestions",
++        description: "After a command, the fast model may suggest a task for a CLI coding agent, shown as a chip above the input. Sends the command and its output, so it only runs while private routing is on.",
++    },
++    prompt_suggestions_agent: HostAiPromptSuggestionsAgent {
++        type: String,
++        default: "claude".to_owned(),
++        supported_platforms: SupportedPlatforms::ALL,
++        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
++        surface: settings::SettingSurfaces::GUI,
++        private: false,
++        toml_path: "host.ai.prompt_suggestions_agent",
++        description: "Command that starts the CLI coding agent for an accepted prompt suggestion; the prompt is added as its last argument (e.g. \"claude\", \"codex\", \"gemini -i\").",
++    },
+     keys_to_host: HostKeysToHost {
+         type: HashMap<String, String>,
+         default: HashMap::default(),
+diff --git a/app/src/settings_view/ai_shared.rs b/app/src/settings_view/ai_shared.rs
+index afe8cbc..17015de 100644
+--- a/app/src/settings_view/ai_shared.rs
++++ b/app/src/settings_view/ai_shared.rs
+@@ -10,17 +10,13 @@
+ use std::borrow::Cow;
+ use std::cell::RefCell;
+ use std::collections::HashMap;
+-use std::marker::PhantomData;
+-
+-use pathfinder_geometry::vector::vec2f;
+ 
+ use settings::Setting;
+ use warp_core::context_flag::ContextFlag;
+ use warp_core::features::FeatureFlag;
+ use warp_core::ui::theme::color::internal_colors;
+ use warpui::elements::{
+-    ChildAnchor, ChildView, Container, Element, Fill, Flex, Hoverable, MouseStateHandle,
+-    OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Stack,
++    ChildView, Container, Element, Fill, Flex, MouseStateHandle, ParentElement,
+ };
+ use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
+ use warpui::ui_components::switch::SwitchStateHandle;
+@@ -28,8 +24,8 @@ use warpui::{Action, AppContext, SingletonEntity, View, ViewContext, ViewHandle}
+ 
+ use super::SettingsAction;
+ use super::settings_page::{
+-    CONTENT_FONT_SIZE, HEADER_PADDING, LocalOnlyIconState, SettingsWidget, ToggleState,
+-    build_toggle_element, render_body_item_label,
++    CONTENT_FONT_SIZE, HEADER_PADDING, LocalOnlyIconState, ToggleState, build_toggle_element,
++    render_body_item_label,
+ };
+ use crate::ai::blocklist::agent_view::agent_input_footer::editor::AgentToolbarInlineEditor;
+ use crate::appearance::Appearance;
+@@ -251,83 +247,3 @@ pub mod styles {
+         }
+     }
+ }
+-
+-/// What a planned-but-not-yet-implemented settings row says on hover.
+-pub const NOT_IMPLEMENTED_TOOLTIP: &str = "Not implemented yet";
+-
+-/// A greyed-out, switched-off settings row for a feature embedded (`remote_tty`) builds plan to
+-/// add but don't have yet. Hovering it says it isn't implemented.
+-pub(super) struct PlannedFeatureWidget<V> {
+-    label: &'static str,
+-    description: &'static str,
+-    search_terms: &'static str,
+-    switch_state: SwitchStateHandle,
+-    mouse_state: MouseStateHandle,
+-    view: PhantomData<fn() -> V>,
+-}
+-
+-impl<V> PlannedFeatureWidget<V> {
+-    pub(super) fn new(
+-        label: &'static str,
+-        description: &'static str,
+-        search_terms: &'static str,
+-    ) -> Self {
+-        Self {
+-            label,
+-            description,
+-            search_terms,
+-            switch_state: Default::default(),
+-            mouse_state: Default::default(),
+-            view: PhantomData,
+-        }
+-    }
+-}
+-
+-impl<V: View> SettingsWidget for PlannedFeatureWidget<V> {
+-    type View = V;
+-
+-    fn widget_id(&self) -> &'static str {
+-        self.label
+-    }
+-
+-    fn search_terms(&self) -> &str {
+-        self.search_terms
+-    }
+-
+-    fn render(&self, _view: &V, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
+-        let label = render_body_item_label::<SettingsAction>(
+-            self.label.to_owned(),
+-            Some(styles::header_font_color(false, app)),
+-            None,
+-            LocalOnlyIconState::Hidden,
+-            ToggleState::Disabled,
+-            appearance,
+-        );
+-        let switch = render_ai_feature_switch(self.switch_state.clone(), false, false, (), app);
+-        let description = self.description;
+-        Hoverable::new(self.mouse_state.clone(), move |mouse_state| {
+-            let row = Flex::column()
+-                .with_child(build_toggle_element(label, switch, appearance, None))
+-                .with_child(render_ai_setting_description(description, false, app))
+-                .finish();
+-            let mut stack = Stack::new().with_child(row);
+-            if mouse_state.is_hovered() {
+-                stack.add_positioned_child(
+-                    appearance
+-                        .ui_builder()
+-                        .tool_tip(NOT_IMPLEMENTED_TOOLTIP.to_owned())
+-                        .build()
+-                        .finish(),
+-                    OffsetPositioning::offset_from_parent(
+-                        vec2f(0., -3.),
+-                        ParentOffsetBounds::Unbounded,
+-                        ParentAnchor::TopLeft,
+-                        ChildAnchor::BottomLeft,
+-                    ),
+-                );
+-            }
+-            stack.finish()
+-        })
+-        .finish()
+-    }
+-}
+diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
+index 610a5df..cf65a5a 100644
+--- a/app/src/settings_view/warp_agent_page.rs
++++ b/app/src/settings_view/warp_agent_page.rs
+@@ -54,7 +54,7 @@ use warpui::{
+ };
+ 
+ use super::ai_shared::{
+-    PlannedFeatureWidget, render_ai_feature_switch, render_ai_setting_description,
++    render_ai_feature_switch, render_ai_setting_description,
+     render_ai_setting_label, render_ai_setting_toggle, render_toolbar_layout_editor, styles,
+     update_editor_interaction_state,
+ };
+@@ -101,7 +101,7 @@ use crate::server::telemetry::{
+ };
+ use crate::settings::{
+     HOST_AI_EFFORT_CHOICES, HostAiExpandedEffort, HostAiPriority, HostAiPrivateRouting,
+-    HostAiNextCommand, HostAiRecentCommandsInContext, HostAiSettings,
++    HostAiNextCommand, HostAiPromptSuggestions, HostAiRecentCommandsInContext, HostAiSettings,
+     AIAutoDetectionEnabled, AICommandDenylist, AISettings, AISettingsChangedEvent,
+     AgentModeQuerySuggestionsEnabled, AutoApproveBypassesCommandDenylist, AwsBedrockAutoLogin,
+     AwsBedrockCredentialsEnabled, CanUseWarpCreditsForFallback, AiCommandSearchDebounceMs, EnableAiCommandSearchHashTrigger,
+@@ -2309,6 +2309,7 @@ impl WarpAgentPageView {
+             HostAiPriorityWidget::new(HostAiModelKind::Expanded, ctx);
+         let host_expanded_effort_widget = HostAiEffortWidget::new(ctx);
+         let host_recent_commands_widget = HostAiRecentCommandsWidget::new(ctx);
++        let host_prompt_suggestions_agent_widget = HostAiPromptSuggestionsAgentWidget::new(ctx);
+ 
+         // Embedded (`remote_tty`) builds have no Warp account or Warp AI: one plain "AI" page
+         // with the host's provider, `#`, planned suggestions and the CLI agent toolbar.
+@@ -2340,11 +2341,8 @@ impl WarpAgentPageView {
+                     "Suggestions",
+                     vec![
+                         Box::new(HostAiNextCommandWidget::default()),
+-                        Box::new(PlannedFeatureWidget::new(
+-                            "Prompt Suggestions",
+-                            PROMPT_SUGGESTIONS_DESCRIPTION,
+-                            "ai a.i. prompt suggestions planned",
+-                        )),
++                        Box::new(HostAiPromptSuggestionsWidget::default()),
++                        Box::new(host_prompt_suggestions_agent_widget),
+                     ],
+                 ),
+                 Category::new("Third-party CLI agents", cli_agent_widgets()),
+@@ -2647,6 +2645,7 @@ pub enum WarpAgentPageAction {
+     SetHostAiExpandedEffort(String),
+     ToggleHostAiPrivateRouting,
+     ToggleHostAiNextCommand,
++    ToggleHostAiPromptSuggestions,
+     SetHostAiRecentCommands(u32),
+     ToggleShowAgentTips,
+     ToggleShowOzUpdatesInZeroState,
+@@ -3013,6 +3012,15 @@ impl TypedActionView for WarpAgentPageView {
+                 });
+                 ctx.notify();
+             }
++            WarpAgentPageAction::ToggleHostAiPromptSuggestions => {
++                // Prompt suggestions send command output; only offered with private routing.
++                let settings = HostAiSettings::as_ref(ctx);
++                let enabled = !*settings.prompt_suggestions && *settings.private_routing;
++                HostAiSettings::handle(ctx).update(ctx, |settings, ctx| {
++                    report_if_error!(settings.prompt_suggestions.set_value(enabled, ctx));
++                });
++                ctx.notify();
++            }
+             WarpAgentPageAction::ToggleHostAiPrivateRouting => {
+                 let set_private_routing = |enabled: bool, ctx: &mut ViewContext<Self>| {
+                     HostAiSettings::handle(ctx).update(ctx, |settings, ctx| {
+@@ -7559,6 +7567,112 @@ impl SettingsWidget for HostAiNextCommandWidget {
+     }
+ }
+ 
++/// Prompt suggestions for a CLI coding agent through the host's fast model; only available with
++/// private routing on.
++#[derive(Default)]
++struct HostAiPromptSuggestionsWidget {
++    toggle: SwitchStateHandle,
++}
++
++impl SettingsWidget for HostAiPromptSuggestionsWidget {
++    type View = WarpAgentPageView;
++
++    fn search_terms(&self) -> &str {
++        "ai a.i. prompt suggestions cli coding agent claude code privacy"
++    }
++
++    fn render(&self, view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++        let settings = HostAiSettings::as_ref(app);
++        let private_routing = *settings.private_routing;
++        let toggle = render_ai_setting_toggle::<HostAiPromptSuggestions>(
++            "Prompt Suggestions",
++            WarpAgentPageAction::ToggleHostAiPromptSuggestions,
++            *settings.prompt_suggestions && private_routing,
++            private_routing,
++            self.toggle.clone(),
++            &view.local_only_icon_tooltip_states,
++            app,
++        );
++        let description = if private_routing {
++            "When a command finishes, the fast model may suggest a task for your CLI coding agent, \
++             shown above the input. Accepting it starts the agent with that prompt. Sends the \
++             command and its output."
++        } else {
++            "Only available with private routing on, since it sends command output."
++        };
++        let column = Flex::column()
++            .with_spacing(4.)
++            .with_child(toggle)
++            .with_child(
++                Text::new(description, appearance.ui_font_family(), CONTENT_FONT_SIZE)
++                    .with_color(styles::description_font_color(true, app).into())
++                    .finish(),
++            )
++            .finish();
++        host_setting_row(column)
++    }
++}
++
++/// The command that starts the CLI coding agent for accepted prompt suggestions.
++struct HostAiPromptSuggestionsAgentWidget {
++    editor: ViewHandle<EditorView>,
++}
++
++impl HostAiPromptSuggestionsAgentWidget {
++    fn new(ctx: &mut ViewContext<WarpAgentPageView>) -> Self {
++        let text = HostAiSettings::as_ref(ctx).prompt_suggestions_agent.clone();
++        let editor = host_settings_editor(&text, "claude", ctx);
++        ctx.subscribe_to_view(&editor, move |_, editor, event, ctx| {
++            if !matches!(event, EditorEvent::Blurred | EditorEvent::Enter) {
++                return;
++            }
++            let mut agent = editor.as_ref(ctx).buffer_text(ctx).trim().to_owned();
++            if agent.is_empty() {
++                agent = "claude".to_owned();
++                editor.update(ctx, |editor, ctx| editor.set_buffer_text(&agent, ctx));
++            }
++            HostAiSettings::handle(ctx).update(ctx, |settings, ctx| {
++                report_if_error!(settings.prompt_suggestions_agent.set_value(agent, ctx))
++            });
++        });
++        Self { editor }
++    }
++}
++
++impl SettingsWidget for HostAiPromptSuggestionsAgentWidget {
++    type View = WarpAgentPageView;
++
++    fn search_terms(&self) -> &str {
++        "ai a.i. prompt suggestions cli coding agent command claude code codex gemini"
++    }
++
++    fn should_render(&self, app: &AppContext) -> bool {
++        let settings = HostAiSettings::as_ref(app);
++        *settings.prompt_suggestions && *settings.private_routing
++    }
++
++    fn render(&self, _view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++        let input = appearance
++            .ui_builder()
++            .text_input(self.editor.clone())
++            .with_style(UiComponentStyles {
++                padding: Some(Coords { top: 10., bottom: 10., left: 16., right: 16. }),
++                background: Some(appearance.theme().surface_2().into()),
++                ..Default::default()
++            })
++            .build()
++            .finish();
++        render_host_setting_column(
++            "CLI agent command",
++            "Starts the agent for an accepted suggestion, with the prompt as its last argument, \
++             e.g. claude, codex or gemini -i.",
++            input,
++            appearance,
++            app,
++        )
++    }
++}
++
+ const HOST_AI_RECENT_COMMANDS_CHOICES: [u32; 5] = [0, 1, 3, 5, 10];
+ 
+ /// How many recent commands go along with `#` requests (only with private routing on).
+diff --git a/app/src/terminal/view.rs b/app/src/terminal/view.rs
+index 107c11c..fcf879d 100644
+--- a/app/src/terminal/view.rs
++++ b/app/src/terminal/view.rs
+@@ -10721,7 +10721,35 @@ impl TerminalView {
+             }
+         };
+ 
++        // Embedded builds have no Warp agent: the prompt goes to the configured CLI coding agent,
++        // started in this terminal with the prompt as its last argument.
++        #[cfg(feature = "remote_tty")]
++        {
++            let _ = interaction_source;
++            let Some(banner_state) = &self.inline_banners_state.prompt_suggestions_banner else {
++                return false;
++            };
++            if banner_state.should_hide {
++                return false;
++            }
++            let prompt = banner_state.prompt_suggestion.prompt.clone();
++            let agent = crate::settings::HostAiSettings::as_ref(ctx)
++                .prompt_suggestions_agent
++                .trim()
++                .to_owned();
++            let agent = if agent.is_empty() {
++                "claude".to_owned()
++            } else {
++                agent
++            };
++            let command = format!("{agent} {}", shell_words::quote(&prompt));
++            self.clear_prompt_suggestions(ctx);
++            self.execute_command_or_set_pending(&command, ctx);
++            return true;
++        }
++
+         // Return early if we've run out of AI usage.
++        #[allow(unreachable_code)]
+         let has_any_ai = {
+             let user_workspaces = UserWorkspaces::as_ref(ctx);
+             let scope = user_workspaces.team_context_for_view(ctx);

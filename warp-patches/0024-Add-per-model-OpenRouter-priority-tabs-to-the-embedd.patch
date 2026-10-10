@@ -1,0 +1,267 @@
+From 72012ed642f9db380acbe55abd9d90d574015094 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 18:28:54 -0700
+Subject: [PATCH 24/49] Add per-model OpenRouter priority tabs to the embedded
+ AI settings
+
+A Balanced / Latency / Cost / Throughput segmented control under the fast
+and expanded models (host.ai.fast_priority, host.ai.expanded_priority) that
+the host sends as OpenRouter's provider.sort. Both default to latency, the
+order the host used before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/settings/host_ai.rs              |  51 +++++++++
+ app/src/settings_view/warp_agent_page.rs | 134 ++++++++++++++++++++++-
+ 2 files changed, 183 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/settings/host_ai.rs b/app/src/settings/host_ai.rs
+index 1cd9229..8c976cc 100644
+--- a/app/src/settings/host_ai.rs
++++ b/app/src/settings/host_ai.rs
+@@ -10,6 +10,37 @@ use settings::{RespectUserSyncSetting, SupportedPlatforms, SyncToCloud};
+ /// Reasoning effort choices for the expanded AI Command Search stage (OpenRouter's values).
+ pub const HOST_AI_EFFORT_CHOICES: [&str; 4] = ["minimal", "low", "medium", "high"];
+ 
++/// How OpenRouter picks among the hosts serving a model (its `provider.sort`).
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum HostAiPriority {
++    /// OpenRouter's default load balancing (no `provider.sort`).
++    Balanced,
++    Latency,
++    Price,
++    Throughput,
++}
++
++impl HostAiPriority {
++    pub const ALL: [Self; 4] = [Self::Balanced, Self::Latency, Self::Price, Self::Throughput];
++
++    /// The stored setting value (and OpenRouter's `provider.sort` value, except `Balanced`).
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Self::Balanced => "balanced",
++            Self::Latency => "latency",
++            Self::Price => "price",
++            Self::Throughput => "throughput",
++        }
++    }
++
++    pub fn from_setting(value: &str) -> Self {
++        Self::ALL
++            .into_iter()
++            .find(|priority| priority.as_str() == value)
++            .unwrap_or(Self::Balanced)
++    }
++}
++
+ define_settings_group!(HostAiSettings, settings: [
+     fast_model: HostAiFastModel {
+         type: String,
+@@ -41,6 +72,26 @@ define_settings_group!(HostAiSettings, settings: [
+         toml_path: "host.ai.expanded_effort",
+         description: "Reasoning effort for the expanded model: minimal, low, medium or high.",
+     },
++    fast_priority: HostAiFastPriority {
++        type: String,
++        default: "latency".to_owned(),
++        supported_platforms: SupportedPlatforms::ALL,
++        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
++        surface: settings::SettingSurfaces::GUI,
++        private: false,
++        toml_path: "host.ai.fast_priority",
++        description: "Which OpenRouter hosts serve the fast model first: balanced, latency, price or throughput.",
++    },
++    expanded_priority: HostAiExpandedPriority {
++        type: String,
++        default: "latency".to_owned(),
++        supported_platforms: SupportedPlatforms::ALL,
++        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
++        surface: settings::SettingSurfaces::GUI,
++        private: false,
++        toml_path: "host.ai.expanded_priority",
++        description: "Which OpenRouter hosts serve the expanded model first: balanced, latency, price or throughput.",
++    },
+     private_routing: HostAiPrivateRouting {
+         type: bool,
+         default: true,
+diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
+index 50befb3..c97d32e 100644
+--- a/app/src/settings_view/warp_agent_page.rs
++++ b/app/src/settings_view/warp_agent_page.rs
+@@ -35,7 +35,7 @@ use warp_errors::report_if_error;
+ use warpui::r#async::Timer;
+ use warpui::elements::{
+     Border, ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
+-    Empty, Expanded, Flex, FormattedTextElement, HighlightedHyperlink, Hoverable, HyperlinkLens,
++    Empty, Expanded, Fill, Flex, FormattedTextElement, HighlightedHyperlink, Hoverable, HyperlinkLens,
+     HyperlinkUrl, MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning,
+     ParentAnchor, ParentElement, ParentOffsetBounds, Radius, Shrinkable, Stack, Text,
+ };
+@@ -43,6 +43,10 @@ use warpui::fonts::{Properties, Weight};
+ use warpui::keymap::{ContextPredicate, Keystroke};
+ use warpui::ui_components::button::ButtonVariant;
+ use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
++use warpui::ui_components::segmented_control::{
++    LabelConfig, RenderableOptionConfig, SegmentedControl, SegmentedControlEvent,
++    TooltipConfig as SegmentTooltipConfig,
++};
+ use warpui::ui_components::switch::{SwitchStateHandle, TooltipConfig};
+ use warpui::{
+     Action, AppContext, Element, Entity, SingletonEntity, TypedActionView, View, ViewContext,
+@@ -96,7 +100,7 @@ use crate::server::telemetry::{
+     AgentModeAutoDetectionSettingOrigin, ToggleCodeSuggestionsSettingSource,
+ };
+ use crate::settings::{
+-    HOST_AI_EFFORT_CHOICES, HostAiExpandedEffort, HostAiPrivateRouting,
++    HOST_AI_EFFORT_CHOICES, HostAiExpandedEffort, HostAiPriority, HostAiPrivateRouting,
+     HostAiRecentCommandsInContext, HostAiSettings,
+     AIAutoDetectionEnabled, AICommandDenylist, AISettings, AISettingsChangedEvent,
+     AgentModeQuerySuggestionsEnabled, AutoApproveBypassesCommandDenylist, AwsBedrockAutoLogin,
+@@ -2300,6 +2304,9 @@ impl WarpAgentPageView {
+         let ai_command_search_debounce_widget = AiCommandSearchDebounceWidget::new(ctx);
+         let host_fast_model_widget = HostAiModelWidget::new(HostAiModelKind::Fast, ctx);
+         let host_expanded_model_widget = HostAiModelWidget::new(HostAiModelKind::Expanded, ctx);
++        let host_fast_priority_widget = HostAiPriorityWidget::new(HostAiModelKind::Fast, ctx);
++        let host_expanded_priority_widget =
++            HostAiPriorityWidget::new(HostAiModelKind::Expanded, ctx);
+         let host_expanded_effort_widget = HostAiEffortWidget::new(ctx);
+         let host_recent_commands_widget = HostAiRecentCommandsWidget::new(ctx);
+ 
+@@ -2313,7 +2320,9 @@ impl WarpAgentPageView {
+                     vec![
+                         Box::new(HostApiKeyWidget::new(ctx)),
+                         Box::new(host_fast_model_widget),
++                        Box::new(host_fast_priority_widget),
+                         Box::new(host_expanded_model_widget),
++                        Box::new(host_expanded_priority_widget),
+                         Box::new(host_expanded_effort_widget),
+                         Box::new(HostAiPrivateRoutingWidget::default()),
+                         Box::new(host_recent_commands_widget),
+@@ -7281,6 +7290,127 @@ impl SettingsWidget for HostAiModelWidget {
+     }
+ }
+ 
++/// Which OpenRouter hosts serve a stage's model first (OpenRouter's `provider.sort`).
++struct HostAiPriorityWidget {
++    kind: HostAiModelKind,
++    control: ViewHandle<SegmentedControl<HostAiPriority>>,
++}
++
++impl HostAiPriorityWidget {
++    fn new(kind: HostAiModelKind, ctx: &mut ViewContext<WarpAgentPageView>) -> Self {
++        let settings = HostAiSettings::as_ref(ctx);
++        let current = HostAiPriority::from_setting(match kind {
++            HostAiModelKind::Fast => &settings.fast_priority,
++            HostAiModelKind::Expanded => &settings.expanded_priority,
++        });
++        let control = ctx.add_typed_action_view(move |ctx| {
++            SegmentedControl::new(
++                HostAiPriority::ALL.to_vec(),
++                render_host_ai_priority_option,
++                current,
++                host_ai_priority_styles(ctx),
++            )
++        });
++        ctx.subscribe_to_view(&control, move |_, _, event, ctx| {
++            let SegmentedControlEvent::OptionSelected(priority) = event;
++            let value = priority.as_str().to_owned();
++            HostAiSettings::handle(ctx).update(ctx, |settings, ctx| match kind {
++                HostAiModelKind::Fast => {
++                    report_if_error!(settings.fast_priority.set_value(value, ctx))
++                }
++                HostAiModelKind::Expanded => {
++                    report_if_error!(settings.expanded_priority.set_value(value, ctx))
++                }
++            });
++        });
++        Self { kind, control }
++    }
++}
++
++fn render_host_ai_priority_option(
++    priority: HostAiPriority,
++    is_selected: bool,
++    app: &AppContext,
++) -> Option<RenderableOptionConfig> {
++    let theme = Appearance::as_ref(app).theme();
++    let (label, tooltip) = match priority {
++        HostAiPriority::Balanced => ("Balanced", "OpenRouter's default mix of price, speed and uptime."),
++        HostAiPriority::Latency => ("Latency", "Hosts that start answering soonest first."),
++        HostAiPriority::Price => ("Cost", "Cheapest hosts first."),
++        HostAiPriority::Throughput => ("Throughput", "Hosts that generate the most tokens per second first."),
++    };
++    Some(RenderableOptionConfig {
++        icon_path: "",
++        icon_color: theme.active_ui_text_color().into(),
++        label: Some(LabelConfig {
++            label: label.into(),
++            width_override: Some(76.),
++            color: if is_selected {
++                theme.active_ui_text_color().into()
++            } else {
++                theme.nonactive_ui_text_color().into()
++            },
++        }),
++        tooltip: Some(SegmentTooltipConfig {
++            text: tooltip.into(),
++            sub_text: None,
++            text_color: theme.active_ui_text_color().into(),
++            background_color: theme.surface_3().into(),
++            border_color: theme.outline().into(),
++        }),
++        background: if is_selected { Fill::Solid(theme.surface_3().into()) } else { Fill::None },
++    })
++}
++
++fn host_ai_priority_styles(app: &AppContext) -> UiComponentStyles {
++    let appearance = Appearance::as_ref(app);
++    let theme = appearance.theme();
++    UiComponentStyles {
++        font_family_id: Some(appearance.ui_font_family()),
++        font_size: Some(appearance.ui_font_size()),
++        border_radius: Some(CornerRadius::with_all(Radius::Pixels(4.))),
++        border_width: Some(1.),
++        border_color: Some(Fill::Solid(theme.outline().into())),
++        background: Some(Fill::Solid(theme.surface_2().into())),
++        height: Some(26.),
++        padding: Some(Coords::uniform(2.)),
++        ..Default::default()
++    }
++}
++
++impl SettingsWidget for HostAiPriorityWidget {
++    type View = WarpAgentPageView;
++
++    fn search_terms(&self) -> &str {
++        match self.kind {
++            HostAiModelKind::Fast => {
++                "ai provider openrouter fast model priority latency cost price throughput speed"
++            }
++            HostAiModelKind::Expanded => {
++                "ai provider openrouter expanded model priority latency cost price throughput speed"
++            }
++        }
++    }
++
++    fn render(&self, _view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++        let label = match self.kind {
++            HostAiModelKind::Fast => "Fast model priority",
++            HostAiModelKind::Expanded => "Expanded model priority",
++        };
++        let control = Flex::row()
++            .with_child(ChildView::new(&self.control).finish())
++            .finish();
++        render_host_setting_column(
++            label,
++            "Which OpenRouter hosts serving this model are tried first. \
++             Private routing still limits them to zero-data-retention hosts.",
++            control,
++            appearance,
++            app,
++        )
++    }
++}
++
+ /// Reasoning effort for the expanded stage.
+ struct HostAiEffortWidget {
+     dropdown: ViewHandle<Dropdown<WarpAgentPageAction>>,

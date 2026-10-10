@@ -1,0 +1,187 @@
+From 06b23885bd7807dc6cff25fda77ddf89e7a5310d Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 16:16:55 -0700
+Subject: [PATCH 18/49] Remove Warp Agent entry points in embedded builds
+
+No agent view (cmd+enter, /agent), no agent hint message bar, no zero
+state block, and no slash command or @ menus in the terminal input.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/ai/blocklist/agent_view/controller.rs | 10 ++++++++++
+ app/src/editor/view/mod.rs                    |  4 ++--
+ app/src/settings/input.rs                     | 15 ++++++++++++++-
+ app/src/terminal/input.rs                     |  5 +----
+ app/src/terminal/input/slash_command_model.rs |  5 +----
+ app/src/terminal/settings.rs                  |  4 +++-
+ app/src/terminal/universal_developer_input.rs |  4 +---
+ app/src/workspace/view.rs                     |  4 ++--
+ 8 files changed, 34 insertions(+), 17 deletions(-)
+
+diff --git a/app/src/ai/blocklist/agent_view/controller.rs b/app/src/ai/blocklist/agent_view/controller.rs
+index 62e8aea..2ff8612 100644
+--- a/app/src/ai/blocklist/agent_view/controller.rs
++++ b/app/src/ai/blocklist/agent_view/controller.rs
+@@ -26,6 +26,8 @@ pub enum EnterAgentViewError {
+     AlreadyInAgentView,
+     #[error("Cannot enter agent mode while a command is running.")]
+     LongRunningCommand,
++    #[error("The Warp Agent isn't available in this build.")]
++    Unavailable,
+ }
+ 
+ /// Error returned when exiting the agent view fails.
+@@ -733,6 +735,11 @@ impl AgentViewController {
+         origin: AgentViewEntryOrigin,
+         ctx: &mut ModelContext<Self>,
+     ) -> Result<AIConversationId, EnterAgentViewError> {
++        // Embedded builds have no Warp Agent (their AI is the host's # command search).
++        if cfg!(feature = "remote_tty") {
++            return Err(EnterAgentViewError::Unavailable);
++        }
++
+         // Block entry to fullscreen mode if there's an active long-running command. Transcript
+         // viewers and 3p cloud viewers are exempt: in those contexts the long-running block is
+         // either a restored snapshot or the harness CLI we want to wrap in agent-view chrome.
+@@ -768,6 +775,9 @@ impl AgentViewController {
+         origin: AgentViewEntryOrigin,
+         ctx: &mut ModelContext<Self>,
+     ) -> Result<AIConversationId, EnterAgentViewError> {
++        if cfg!(feature = "remote_tty") {
++            return Err(EnterAgentViewError::Unavailable);
++        }
+         if self.agent_view_state.is_active() {
+             return Err(EnterAgentViewError::AlreadyInAgentView);
+         }
+diff --git a/app/src/editor/view/mod.rs b/app/src/editor/view/mod.rs
+index eaf1a18..90219f0 100644
+--- a/app/src/editor/view/mod.rs
++++ b/app/src/editor/view/mod.rs
+@@ -8304,7 +8304,7 @@ impl EditorView {
+             && {
+                 if !self.is_ai_input {
+                     // In terminal mode, check the setting
+-                    if !*InputSettings::as_ref(ctx).at_context_menu_in_terminal_mode {
++                    if !InputSettings::as_ref(ctx).is_at_context_menu_in_terminal_enabled() {
+                         false
+                     } else {
+                         self.ai_context_menu_state
+@@ -8707,7 +8707,7 @@ impl TypedActionView for EditorView {
+                 if !self.is_ai_input && *open {
+                     // In terminal mode, check the setting before opening
+                     let input_settings = InputSettings::as_ref(ctx);
+-                    if *input_settings.at_context_menu_in_terminal_mode {
++                    if input_settings.is_at_context_menu_in_terminal_enabled() {
+                         ctx.emit(Event::SetAIContextMenuOpen(*open));
+                     }
+                     // If setting is false, don't emit the event to open the menu
+diff --git a/app/src/settings/input.rs b/app/src/settings/input.rs
+index 4263a94..df6f8f0 100644
+--- a/app/src/settings/input.rs
++++ b/app/src/settings/input.rs
+@@ -288,6 +288,19 @@ impl InputSettings {
+     }
+ 
+     pub fn is_terminal_input_message_bar_enabled(&self) -> bool {
+-        *self.show_terminal_input_message_bar
++        // Embedded builds have no Warp Agent, so the bar's agent hints don't apply.
++        !cfg!(feature = "remote_tty") && *self.show_terminal_input_message_bar
++    }
++
++    /// Whether slash commands are available in the terminal input. Embedded builds have none of
++    /// the Warp Agent commands they offer.
++    pub fn is_slash_commands_in_terminal_enabled(&self) -> bool {
++        !cfg!(feature = "remote_tty") && *self.enable_slash_commands_in_terminal
++    }
++
++    /// Whether the @ context menu is available in terminal mode. Embedded builds have no Warp
++    /// Agent to attach context for.
++    pub fn is_at_context_menu_in_terminal_enabled(&self) -> bool {
++        !cfg!(feature = "remote_tty") && *self.at_context_menu_in_terminal_mode
+     }
+ }
+diff --git a/app/src/terminal/input.rs b/app/src/terminal/input.rs
+index 6319b53..2e12ac0 100644
+--- a/app/src/terminal/input.rs
++++ b/app/src/terminal/input.rs
+@@ -17028,10 +17028,7 @@ impl View for Input {
+             ctx.set.insert(flags::IS_ANY_AI_ENABLED);
+         }
+ 
+-        if *InputSettings::as_ref(app)
+-            .enable_slash_commands_in_terminal
+-            .value()
+-        {
++        if InputSettings::as_ref(app).is_slash_commands_in_terminal_enabled() {
+             ctx.set.insert(flags::SLASH_COMMANDS_IN_TERMINAL_FLAG);
+         }
+ 
+diff --git a/app/src/terminal/input/slash_command_model.rs b/app/src/terminal/input/slash_command_model.rs
+index 20ea4d5..77db6fb 100644
+--- a/app/src/terminal/input/slash_command_model.rs
++++ b/app/src/terminal/input/slash_command_model.rs
+@@ -1,6 +1,5 @@
+ use ai::skills::SkillReference;
+ use input_classifier::InputType;
+-use settings::Setting as _;
+ use warp_core::features::FeatureFlag;
+ use warp_search_core::inline_menu::InputDrivenInlineMenuLifecycle;
+ use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity};
+@@ -286,9 +285,7 @@ impl SlashCommandModel {
+             }
+         } else if !self.data_source.as_ref(ctx).is_agent_view_active(ctx)
+             && !self.data_source.as_ref(ctx).is_cli_agent_input_open(ctx)
+-            && !*InputSettings::as_ref(ctx)
+-                .enable_slash_commands_in_terminal
+-                .value()
++            && !InputSettings::as_ref(ctx).is_slash_commands_in_terminal_enabled()
+             && !self.is_disabled()
+         {
+             self.disable_until_empty_buffer(new.is_empty(), ctx);
+diff --git a/app/src/terminal/settings.rs b/app/src/terminal/settings.rs
+index 81c398e..aadf28e 100644
+--- a/app/src/terminal/settings.rs
++++ b/app/src/terminal/settings.rs
+@@ -220,7 +220,9 @@ impl TerminalSettings {
+     /// Whether the terminal zero state block should be shown.
+     /// Checks both the user setting and the global AI enablement.
+     pub fn should_show_zero_state_block(&self, ctx: &AppContext) -> bool {
+-        *self.show_terminal_zero_state_block && AISettings::as_ref(ctx).is_any_ai_enabled(ctx)
++        !cfg!(feature = "remote_tty")
++            && *self.show_terminal_zero_state_block
++            && AISettings::as_ref(ctx).is_any_ai_enabled(ctx)
+     }
+ 
+     /// Whether asynchronous terminal find should be used. On channels where
+diff --git a/app/src/terminal/universal_developer_input.rs b/app/src/terminal/universal_developer_input.rs
+index 9cd726d..d518c72 100644
+--- a/app/src/terminal/universal_developer_input.rs
++++ b/app/src/terminal/universal_developer_input.rs
+@@ -151,9 +151,7 @@ impl AtContextMenuDisabledReason {
+ 
+         // Only check the setting if we're in shell mode
+         if input_config.input_type == InputType::Shell
+-            && !*InputSettings::as_ref(ctx)
+-                .at_context_menu_in_terminal_mode
+-                .value()
++            && !InputSettings::as_ref(ctx).is_at_context_menu_in_terminal_enabled()
+         {
+             return Some(AtContextMenuDisabledReason::DisabledInTerminalMode);
+         }
+diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
+index af2c41b..0b22e8b 100644
+--- a/app/src/workspace/view.rs
++++ b/app/src/workspace/view.rs
+@@ -23702,10 +23702,10 @@ impl Workspace {
+                 .insert(flags::SHOW_TERMINAL_INPUT_MESSAGE_LINE_FLAG);
+         }
+ 
+-        if *input_settings.enable_slash_commands_in_terminal.value() {
++        if input_settings.is_slash_commands_in_terminal_enabled() {
+             context.set.insert(flags::SLASH_COMMANDS_IN_TERMINAL_FLAG);
+         }
+-        if *input_settings.at_context_menu_in_terminal_mode.value() {
++        if input_settings.is_at_context_menu_in_terminal_enabled() {
+             context.set.insert(flags::AT_CONTEXT_MENU_IN_TERMINAL_FLAG);
+         }
+         if *input_settings.enable_ai_command_search_hash_trigger.value() {

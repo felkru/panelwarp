@@ -1,0 +1,249 @@
+From 0ce4b132a053a2f2df617b265488887e6dfe532a Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 14:48:04 -0700
+Subject: [PATCH 13/49] Two-stage AI command search and OpenRouter key row for
+ embedded builds
+
+Embedded (remote_tty) builds register the Warp AI async source twice: a fast
+stage at the AI Command Search delay (now 50 ms by default, like desktop) and
+an expanded stage that waits for at least a 400 ms pause. The host page's
+warpPanelGenerateCommands gets the stage, so the host can answer quickly with
+one model and add non-duplicate options from a slower one. The AI provider key
+row now takes an OpenRouter key.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/platform/wasm.rs                 |  8 +++++--
+ app/src/search/command_search/view.rs    | 18 ++++++++++++++
+ app/src/search/command_search/warp_ai.rs | 30 +++++++++++++++++++++---
+ app/src/server/server_api/ai.rs          |  2 +-
+ app/src/settings/input.rs                |  6 ++---
+ app/src/settings_view/warp_agent_page.rs | 16 ++++++-------
+ 6 files changed, 63 insertions(+), 17 deletions(-)
+
+diff --git a/app/src/platform/wasm.rs b/app/src/platform/wasm.rs
+index 6587057..a2caa97 100644
+--- a/app/src/platform/wasm.rs
++++ b/app/src/platform/wasm.rs
+@@ -43,6 +43,7 @@ mod ffi {
+         pub fn generate_commands(
+             prompt: &str,
+             context_json: Option<String>,
++            stage: &str,
+         ) -> Result<js_sys::Promise, JsValue>;
+     }
+ }
+@@ -62,12 +63,15 @@ struct HostCommandParameter {
+ }
+ 
+ /// Generates commands for AI Command Search (`#`) via the embedding host app's
+-/// `window.warpPanelGenerateCommands(prompt, contextJson)`, which resolves to a JSON array of
++/// `window.warpPanelGenerateCommands(prompt, contextJson, stage)`, which resolves to a JSON array of
+ /// `{command, description, parameters: [{id, description}]}` or rejects with an error code
+ /// (`bad_prompt`, `rate_limited`, `provider_error`, or anything else for a generic error).
++/// `stage` is `"fast"` for the first quick suggestions or `"expanded"` for additional ones that
++/// don't repeat the fast stage's.
+ pub async fn generate_commands_in_host(
+     prompt: String,
+     ai_execution_context: Option<crate::ai_assistant::execution_context::WarpAiExecutionContext>,
++    stage: &str,
+ ) -> Result<
+     Vec<crate::ai_assistant::AIGeneratedCommand>,
+     crate::ai_assistant::GenerateCommandsFromNaturalLanguageError,
+@@ -75,7 +79,7 @@ pub async fn generate_commands_in_host(
+     use crate::ai_assistant::{AIGeneratedCommand, GenerateCommandsFromNaturalLanguageError as Error};
+ 
+     let context_json = ai_execution_context.and_then(|context| context.to_json_string());
+-    let promise = ffi::generate_commands(&prompt, context_json).map_err(|_| Error::Other)?;
++    let promise = ffi::generate_commands(&prompt, context_json, stage).map_err(|_| Error::Other)?;
+     let result = wasm_bindgen_futures::JsFuture::from(promise)
+         .await
+         .map_err(|err| match err.as_string().as_deref() {
+diff --git a/app/src/search/command_search/view.rs b/app/src/search/command_search/view.rs
+index ea8e14c..ae3bb67 100644
+--- a/app/src/search/command_search/view.rs
++++ b/app/src/search/command_search/view.rs
+@@ -58,6 +58,10 @@ use crate::terminal::{History, HistoryEvent};
+ use crate::workspaces::user_workspaces::UserWorkspaces;
+ 
+ const DEFAULT_PLACEHOLDER_TEXT: &str = "Search your history, workflows, and more";
++/// Embedded builds' expanded AI stage (a slower, pricier model) waits at least this long after
++/// typing stops, so partial queries mostly only reach the fast stage.
++#[cfg(feature = "remote_tty")]
++const EXPANDED_AI_SEARCH_MIN_DEBOUNCE: Duration = Duration::from_millis(400);
+ const PANEL_POSITION_ID: &str = "CommandSearchViewPanel";
+ const DETAILS_PANEL_MARGIN: f32 = 4.;
+ const MIN_WIDTH_RATIO: f32 = 0.25;
+@@ -237,6 +241,20 @@ impl CommandSearchView {
+                     WarpAIDataSource::new(self.ai_client.clone(), None),
+                     HashSet::from([QueryFilter::NaturalLanguage]),
+                 );
++                // Embedded builds: a slower model adds more options once typing pauses longer.
++                // Added first so its late results sit above the fast stage's.
++                #[cfg(feature = "remote_tty")]
++                mixer.add_async_source(
++                    WarpAIDataSource::new(self.ai_client.clone(), ai_execution_context.clone())
++                        .with_host_stage("expanded"),
++                    HashSet::from([QueryFilter::NaturalLanguage]),
++                    AddAsyncSourceOptions {
++                        debounce_interval: Some(ai_debounce.max(EXPANDED_AI_SEARCH_MIN_DEBOUNCE)),
++                        run_in_zero_state: false,
++                        run_when_unfiltered: false,
++                    },
++                    ctx,
++                );
+                 mixer.add_async_source(
+                     WarpAIDataSource::new(self.ai_client.clone(), ai_execution_context),
+                     HashSet::from([QueryFilter::NaturalLanguage]),
+diff --git a/app/src/search/command_search/warp_ai.rs b/app/src/search/command_search/warp_ai.rs
+index d64bd01..9822015 100644
+--- a/app/src/search/command_search/warp_ai.rs
++++ b/app/src/search/command_search/warp_ai.rs
+@@ -147,6 +147,9 @@ impl SearchItem for WarpAISearchItem {
+ pub struct WarpAIDataSource {
+     ai_client: Arc<dyn AIClient>,
+     ai_execution_context: Option<WarpAiExecutionContext>,
++    /// Embedded (`remote_tty`) builds register the async source twice: a fast first stage and an
++    /// expanded stage whose host adds options that don't repeat the fast ones.
++    host_stage: &'static str,
+ }
+ 
+ impl WarpAIDataSource {
+@@ -157,8 +160,14 @@ impl WarpAIDataSource {
+         Self {
+             ai_client,
+             ai_execution_context,
++            host_stage: "fast",
+         }
+     }
++
++    pub fn with_host_stage(mut self, host_stage: &'static str) -> Self {
++        self.host_stage = host_stage;
++        self
++    }
+ }
+ 
+ impl SyncDataSource for WarpAIDataSource {
+@@ -191,11 +200,26 @@ impl AsyncDataSource for WarpAIDataSource {
+         let query_text = query.text.clone();
+         let ai_execution_context = self.ai_execution_context.clone();
+         let ai_client = self.ai_client.clone();
++        let host_stage = self.host_stage;
+ 
+         Box::pin(async move {
+-            let res = ai_client
+-                .generate_commands_from_natural_language(query_text, ai_execution_context)
+-                .await;
++            #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
++            let res = {
++                let _ = ai_client;
++                crate::platform::wasm::generate_commands_in_host(
++                    query_text,
++                    ai_execution_context,
++                    host_stage,
++                )
++                .await
++            };
++            #[cfg(not(all(target_family = "wasm", feature = "remote_tty")))]
++            let res = {
++                let _ = host_stage;
++                ai_client
++                    .generate_commands_from_natural_language(query_text, ai_execution_context)
++                    .await
++            };
+ 
+             match res {
+                 Ok(ai_commands) => {
+diff --git a/app/src/server/server_api/ai.rs b/app/src/server/server_api/ai.rs
+index 202bc66..e1eee30 100644
+--- a/app/src/server/server_api/ai.rs
++++ b/app/src/server/server_api/ai.rs
+@@ -1940,7 +1940,7 @@ impl AIClient for ServerApi {
+     ) -> Result<Vec<AIGeneratedCommand>, GenerateCommandsFromNaturalLanguageError> {
+         // Embedded builds answer with the host app's own AI provider (bring-your-own-key).
+         #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
+-        return crate::platform::wasm::generate_commands_in_host(prompt, _ai_execution_context)
++        return crate::platform::wasm::generate_commands_in_host(prompt, _ai_execution_context, "fast")
+             .await;
+ 
+         #[allow(unreachable_code)]
+diff --git a/app/src/settings/input.rs b/app/src/settings/input.rs
+index fc51e22..4263a94 100644
+--- a/app/src/settings/input.rs
++++ b/app/src/settings/input.rs
+@@ -174,9 +174,9 @@ define_settings_group!(InputSettings,
+         },
+         ai_command_search_debounce_ms: AiCommandSearchDebounceMs {
+             type: u32,
+-            // Embedded builds pay per request with the user's own API key, so wait for a pause in
+-            // typing instead of querying on (nearly) every keystroke.
+-            default: { if cfg!(feature = "remote_tty") { 400 } else { 50 } },
++            // Embedded builds use this for the fast first stage only; the slower, pricier stage
++            // waits for a longer pause (see `EXPANDED_AI_SEARCH_MIN_DEBOUNCE`).
++            default: 50,
+             supported_platforms: SupportedPlatforms::ALL,
+             sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+             surface: settings::SettingSurfaces::GUI,
+diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
+index 99724b8..204d911 100644
+--- a/app/src/settings_view/warp_agent_page.rs
++++ b/app/src/settings_view/warp_agent_page.rs
+@@ -3810,8 +3810,8 @@ impl SettingsWidget for AiCommandSearchDebounceWidget {
+             appearance,
+             "AI Command Search delay",
+             Some(
+-                "How long to wait after you stop typing before asking for suggestions. \
+-                 Shorter feels faster; longer sends fewer requests.",
++                "How long to wait after you stop typing before asking for the first \
++                 suggestions. More options follow once typing pauses for at least 400 ms.",
+             ),
+             None,
+             LocalOnlyIconState::for_setting(
+@@ -6912,10 +6912,10 @@ pub(crate) fn host_api_key_widget_id() -> &'static str {
+     HostApiKeyWidget::static_widget_id()
+ }
+ 
+-const HOST_API_KEY_PLACEHOLDER: &str = "sk-ant-...";
++const HOST_API_KEY_PLACEHOLDER: &str = "sk-or-...";
+ const HOST_API_KEY_SAVED_PLACEHOLDER: &str = "Saved in VS Code (paste a new key to replace it)";
+ 
+-/// Anthropic API key for embedded (`remote_tty`) builds. The key is handed straight to the host
++/// OpenRouter API key for embedded (`remote_tty`) builds. The key is handed straight to the host
+ /// app, which stores it (VS Code: SecretStorage); Warp never keeps it.
+ struct HostApiKeyWidget {
+     editor: ViewHandle<EditorView>,
+@@ -6953,7 +6953,7 @@ impl HostApiKeyWidget {
+                 return;
+             }
+             #[cfg(target_family = "wasm")]
+-            let saved = crate::platform::wasm::store_api_key_in_host("anthropic", &key);
++            let saved = crate::platform::wasm::store_api_key_in_host("openrouter", &key);
+             #[cfg(not(target_family = "wasm"))]
+             let saved = false;
+             if saved {
+@@ -6971,7 +6971,7 @@ impl SettingsWidget for HostApiKeyWidget {
+     type View = WarpAgentPageView;
+ 
+     fn search_terms(&self) -> &str {
+-        "ai provider anthropic claude api key byok bring your own key command search"
++        "ai provider openrouter deepseek anthropic claude api key byok bring your own key command search"
+     }
+ 
+     fn render(
+@@ -6991,14 +6991,14 @@ impl SettingsWidget for HostApiKeyWidget {
+             ..Default::default()
+         };
+         let label = Text::new_inline(
+-            "Anthropic API key",
++            "OpenRouter API key",
+             appearance.ui_font_family(),
+             CONTENT_FONT_SIZE,
+         )
+         .with_color(styles::header_font_color(true, app).into())
+         .finish();
+         let description = Text::new(
+-            "Used for AI Command Search (#). Stored in VS Code's secret storage, never in Warp.",
++            "Used for AI Command Search (#). Create one at openrouter.ai/keys. Stored in VS Code's secret storage, never in Warp.",
+             appearance.ui_font_family(),
+             CONTENT_FONT_SIZE,
+         )

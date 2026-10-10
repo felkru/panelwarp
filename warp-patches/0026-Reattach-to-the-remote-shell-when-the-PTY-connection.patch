@@ -1,0 +1,306 @@
+From 6631b221c117f3d4c901a5e2087a48fb9899be09 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 21:58:39 -0700
+Subject: [PATCH 26/49] Reattach to the remote shell when the PTY connection
+ drops
+
+Browsers close WebSockets on sleep and network changes, which left the panel
+looking alive but dead. The host now keeps the shell running and sends a
+session id; on a closed connection the event loop reconnects with it (backing
+off up to 5 s), holds outgoing input while disconnected, and stops once the
+host reports the shell exited.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/terminal/remote_tty/event_loop.rs | 187 ++++++++++++++++++----
+ 1 file changed, 158 insertions(+), 29 deletions(-)
+
+diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
+index 69805f5..5180629 100644
+--- a/app/src/terminal/remote_tty/event_loop.rs
++++ b/app/src/terminal/remote_tty/event_loop.rs
+@@ -1,11 +1,15 @@
+ use std::io;
++use std::pin::Pin;
+ use std::sync::Arc;
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::time::Duration;
+ 
+-use async_channel::Receiver;
++use async_channel::{Receiver, Sender};
+ use futures_util::SinkExt;
+ use parking_lot::FairMutex;
+-use serde::Serialize;
++use serde::{Deserialize, Serialize};
+ use warp_errors::report_error;
++use warpui::r#async::Timer;
+ use warpui::{Entity, ModelContext, SingletonEntity};
+ use websocket::{Message, Sink, Stream, WebSocket, WebsocketMessage as _};
+ 
+@@ -29,7 +33,10 @@ fn create_session_endpoint() -> String {
+     #[cfg(target_family = "wasm")]
+     if let Some(url) = web_sys::window()
+         .and_then(|window| window.location().hash().ok())
+-        .and_then(|hash| hash.strip_prefix(PTY_URL_FRAGMENT_PREFIX).map(str::to_owned))
++        .and_then(|hash| {
++            hash.strip_prefix(PTY_URL_FRAGMENT_PREFIX)
++                .map(str::to_owned)
++        })
+     {
+         return url;
+     }
+@@ -49,11 +56,55 @@ struct WindowSizeChange {
+     height_px: u32,
+ }
+ 
++/// How long to keep trying to reattach to the shell after the connection drops, e.g. when the
++/// browser closes its sockets on a network change (sleep, Wi-Fi switch). The host keeps the shell
++/// running meanwhile.
++const MAX_RECONNECT_ATTEMPTS: u32 = 200;
++
++type BoxedSink = Pin<Box<dyn futures::Sink<Message, Error = websocket::Error> + Send>>;
++
++/// A message for the PTY host, rebuilt for every send attempt so it can be retried on a new
++/// connection.
++enum Outgoing {
++    Binary(Vec<u8>),
++    Text(String),
++}
++
++impl Outgoing {
++    fn to_message(&self) -> Message {
++        match self {
++            Self::Binary(bytes) => Message::new_binary(bytes.clone()),
++            Self::Text(text) => Message::new_text(text.clone()),
++        }
++    }
++}
++
++/// Control messages the PTY host sends as text frames.
++#[derive(Deserialize)]
++#[serde(rename_all = "snake_case")]
++enum HostControl {
++    /// The id to reattach to this shell with after the connection drops.
++    Session(String),
++    /// The shell exited; there is nothing to reattach to.
++    Exited(i32),
++}
++
+ pub(super) struct EventLoop {
+     terminal_model: Arc<FairMutex<TerminalModel>>,
+     parser: Processor,
+     event_loop_rx: Receiver<EventLoopMessage>,
+     channel_event_listener: ChannelEventListener,
++    /// The host's id for this shell, once it has sent one.
++    session_id: Option<String>,
++    shell_exited: bool,
++    reconnect_attempts: u32,
++    /// Hands the writer task the sink of a new connection after a reconnect.
++    sink_tx: Sender<BoxedSink>,
++    sink_rx: Receiver<BoxedSink>,
++    /// Whether the current connection is open. A browser WebSocket silently drops what's sent
++    /// after it closes, so the writer holds messages while this is false.
++    connected: Arc<AtomicBool>,
++    writer_started: bool,
+ }
+ 
+ impl EventLoop {
+@@ -81,11 +132,19 @@ impl EventLoop {
+         websocket_receiver: Receiver<EventLoopMessage>,
+         channel_event_listener: ChannelEventListener,
+     ) -> Self {
++        let (sink_tx, sink_rx) = async_channel::unbounded();
+         Self {
+             terminal_model,
+             parser: Processor::default(),
+             event_loop_rx: websocket_receiver,
+             channel_event_listener,
++            session_id: None,
++            shell_exited: false,
++            reconnect_attempts: 0,
++            sink_tx,
++            sink_rx,
++            connected: Arc::new(AtomicBool::new(false)),
++            writer_started: false,
+         }
+     }
+ 
+@@ -98,13 +157,15 @@ impl EventLoop {
+         format!("{endpoint}{separator}num_rows={num_rows}&num_cols={num_cols}")
+     }
+ 
+-    /// Starts tasks to listen to and write to the websocket.
++    /// Starts tasks to listen to and write to the websocket. On a reconnect, hands the new sink to
++    /// the running writer task instead of bootstrapping the shell again.
+     fn start_websocket_listener_and_writer_tasks(
+         &mut self,
+-        mut sink: impl Sink,
++        sink: impl Sink,
+         stream: impl Stream,
+         ctx: &mut ModelContext<Self>,
+     ) {
++        self.reconnect_attempts = 0;
+         // TODO(alokedesai): Add a spawn_stream equivalent that runs on the background executor.
+         ctx.spawn_stream_local(
+             stream,
+@@ -117,22 +178,34 @@ impl EventLoop {
+                     }
+                 };
+ 
+-                let Some(bytes) = message.binary() else {
+-                    report_error!("Received non binary message");
+-                    return;
+-                };
+-
+-                event_loop.process_pty_bytes(bytes);
++                if let Some(bytes) = message.binary() {
++                    event_loop.process_pty_bytes(bytes);
++                } else if let Some(text) = message.text() {
++                    event_loop.on_host_control(text);
++                }
+             },
+-            |_, _| {},
++            |event_loop, ctx| event_loop.on_connection_closed(ctx),
+         );
+ 
++        let sink: BoxedSink = Box::pin(sink);
++        if self.writer_started {
++            // Hand over the sink before marking the connection open, so the writer finds it.
++            let _ = self.sink_tx.try_send(sink);
++            self.connected.store(true, Ordering::SeqCst);
++            return;
++        }
++        self.connected.store(true, Ordering::SeqCst);
++        self.writer_started = true;
++
+         let is_honor_ps1_enabled = *SessionSettings::as_ref(ctx).honor_ps1;
+ 
+         let terminal_model_for_init = self.terminal_model.clone();
+         let receiver = self.event_loop_rx.clone();
++        let new_sinks = self.sink_rx.clone();
++        let connected = self.connected.clone();
+         ctx.background_executor()
+             .spawn(async move {
++                let mut sink = sink;
+                 if let Err(e) = Self::write_env_vars(&mut sink, is_honor_ps1_enabled).await {
+                     report_error!(e.context("Failed to write env vars to pty"));
+                 }
+@@ -143,15 +216,8 @@ impl EventLoop {
+                 }
+ 
+                 while let Ok(message) = receiver.recv().await {
+-                    match message {
+-                        EventLoopMessage::Input(bytes) => {
+-                            if let Err(e) = sink.send(Message::new_binary(bytes.to_vec())).await {
+-                                report_error!(
+-                                    anyhow::Error::new(e)
+-                                        .context("Failed to send message to network-backed PTY")
+-                                );
+-                            };
+-                        }
++                    let outgoing = match message {
++                        EventLoopMessage::Input(bytes) => Outgoing::Binary(bytes.to_vec()),
+                         EventLoopMessage::Resize(size_info) => {
+                             let size_change = WindowSizeChange {
+                                 width: size_info.columns as u32,
+@@ -168,21 +234,79 @@ impl EventLoop {
+                             // Sending as a `Text` message implies that this is a
+                             // control channel message. The SSH proxy server should
+                             // make this distinction.
+-                            if let Err(e) = sink.send(Message::new_text(serialized)).await {
+-                                report_error!(
+-                                    anyhow::Error::new(e)
+-                                        .context("Failed to send message to network-backed PTY")
+-                                );
+-                            };
++                            Outgoing::Text(serialized)
+                         }
+                         // TODO(alokedesai): Implement shutdown on the network backed PTY.
+-                        EventLoopMessage::Shutdown | EventLoopMessage::ChildExited => {}
++                        EventLoopMessage::Shutdown | EventLoopMessage::ChildExited => continue,
++                    };
++
++                    // Hold the message while disconnected, switch to the newest connection, then
++                    // send; if the send fails, wait for the event loop to reconnect.
++                    if !connected.load(Ordering::SeqCst) {
++                        match new_sinks.recv().await {
++                            Ok(newer) => sink = newer,
++                            Err(_) => return,
++                        }
++                    }
++                    while let Ok(newer) = new_sinks.try_recv() {
++                        sink = newer;
++                    }
++                    while sink.send(outgoing.to_message()).await.is_err() {
++                        match new_sinks.recv().await {
++                            Ok(newer) => sink = newer,
++                            Err(_) => return,
++                        }
+                     }
+                 }
+             })
+             .detach();
+     }
+ 
++    fn on_host_control(&mut self, text: &str) {
++        match serde_json::from_str::<HostControl>(text) {
++            Ok(HostControl::Session(id)) => self.session_id = Some(id),
++            Ok(HostControl::Exited(code)) => {
++                log::info!("Remote shell exited with code {code}");
++                self.shell_exited = true;
++            }
++            Err(_) => report_error!("Received unknown text message from the PTY host"),
++        }
++    }
++
++    fn on_connection_closed(&mut self, ctx: &mut ModelContext<Self>) {
++        self.connected.store(false, Ordering::SeqCst);
++        if self.shell_exited || self.session_id.is_none() {
++            return;
++        }
++        log::warn!("Connection to the PTY host closed; reattaching to the shell");
++        self.schedule_reconnect(ctx);
++    }
++
++    fn schedule_reconnect(&mut self, ctx: &mut ModelContext<Self>) {
++        if self.reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
++            report_error!("Gave up reattaching to the remote shell");
++            return;
++        }
++        self.reconnect_attempts += 1;
++        // Back off from a quick first retry to one every 5 s.
++        let delay = Duration::from_millis(250 * 2u64.pow(self.reconnect_attempts.min(5) - 1))
++            .min(Duration::from_secs(5));
++        ctx.spawn(Timer::after(delay), |me, _, ctx| me.reconnect(ctx));
++    }
++
++    fn reconnect(&mut self, ctx: &mut ModelContext<Self>) {
++        let Some(session_id) = self.session_id.clone() else {
++            return;
++        };
++        let endpoint = create_session_endpoint();
++        let separator = if endpoint.contains('?') { '&' } else { '?' };
++        let url = format!("{endpoint}{separator}session={session_id}");
++        ctx.spawn(
++            WebSocket::connect(url, None /* protocols */),
++            Self::on_ws_connection,
++        );
++    }
++
+     /// Writes the ZSH init shell script to the "PTY", mimicking how we send the init shell script
+     /// when there is a local pty:
+     /// <https://github.com/warpdotdev/warp-internal/blob/747da2df83f2caa97e781ce284ceb226fb97a66c/app/src/terminal/local_tty/unix.rs#L338-L347>.
+@@ -232,7 +356,12 @@ impl EventLoop {
+         let connection = match connection {
+             Ok(connection) => connection,
+             Err(e) => {
+-                report_error!(e.context("Failed to construct websocket connection"));
++                if self.session_id.is_some() && !self.shell_exited {
++                    // Still reattaching (e.g. the network is back but not the host yet).
++                    self.schedule_reconnect(ctx);
++                } else {
++                    report_error!(e.context("Failed to construct websocket connection"));
++                }
+                 return;
+             }
+         };

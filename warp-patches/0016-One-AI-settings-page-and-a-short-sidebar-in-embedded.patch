@@ -1,0 +1,785 @@
+From 10d2c036d6c322dee961057863b52303d8d995d1 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 16:16:55 -0700
+Subject: [PATCH 16/49] One AI settings page and a short sidebar in embedded
+ builds
+
+The AI page holds the OpenRouter provider, # command search, suggestions
+and third-party CLI agents. Planned features render greyed out with a
+"Not implemented yet" tooltip. The sidebar keeps AI, Appearance,
+Features, Keybindings, Warpify, Scripting, Privacy and About.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/settings_view/ai_shared.rs       |  90 +++++++++-
+ app/src/settings_view/cli_agents_page.rs | 208 ++++++++++++++++-------
+ app/src/settings_view/mod.rs             |  55 ++++++
+ app/src/settings_view/warp_agent_page.rs |  97 ++++++++---
+ 4 files changed, 363 insertions(+), 87 deletions(-)
+
+diff --git a/app/src/settings_view/ai_shared.rs b/app/src/settings_view/ai_shared.rs
+index 17015de..afe8cbc 100644
+--- a/app/src/settings_view/ai_shared.rs
++++ b/app/src/settings_view/ai_shared.rs
+@@ -10,13 +10,17 @@
+ use std::borrow::Cow;
+ use std::cell::RefCell;
+ use std::collections::HashMap;
++use std::marker::PhantomData;
++
++use pathfinder_geometry::vector::vec2f;
+ 
+ use settings::Setting;
+ use warp_core::context_flag::ContextFlag;
+ use warp_core::features::FeatureFlag;
+ use warp_core::ui::theme::color::internal_colors;
+ use warpui::elements::{
+-    ChildView, Container, Element, Fill, Flex, MouseStateHandle, ParentElement,
++    ChildAnchor, ChildView, Container, Element, Fill, Flex, Hoverable, MouseStateHandle,
++    OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Stack,
+ };
+ use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
+ use warpui::ui_components::switch::SwitchStateHandle;
+@@ -24,8 +28,8 @@ use warpui::{Action, AppContext, SingletonEntity, View, ViewContext, ViewHandle}
+ 
+ use super::SettingsAction;
+ use super::settings_page::{
+-    CONTENT_FONT_SIZE, HEADER_PADDING, LocalOnlyIconState, ToggleState, build_toggle_element,
+-    render_body_item_label,
++    CONTENT_FONT_SIZE, HEADER_PADDING, LocalOnlyIconState, SettingsWidget, ToggleState,
++    build_toggle_element, render_body_item_label,
+ };
+ use crate::ai::blocklist::agent_view::agent_input_footer::editor::AgentToolbarInlineEditor;
+ use crate::appearance::Appearance;
+@@ -247,3 +251,83 @@ pub mod styles {
+         }
+     }
+ }
++
++/// What a planned-but-not-yet-implemented settings row says on hover.
++pub const NOT_IMPLEMENTED_TOOLTIP: &str = "Not implemented yet";
++
++/// A greyed-out, switched-off settings row for a feature embedded (`remote_tty`) builds plan to
++/// add but don't have yet. Hovering it says it isn't implemented.
++pub(super) struct PlannedFeatureWidget<V> {
++    label: &'static str,
++    description: &'static str,
++    search_terms: &'static str,
++    switch_state: SwitchStateHandle,
++    mouse_state: MouseStateHandle,
++    view: PhantomData<fn() -> V>,
++}
++
++impl<V> PlannedFeatureWidget<V> {
++    pub(super) fn new(
++        label: &'static str,
++        description: &'static str,
++        search_terms: &'static str,
++    ) -> Self {
++        Self {
++            label,
++            description,
++            search_terms,
++            switch_state: Default::default(),
++            mouse_state: Default::default(),
++            view: PhantomData,
++        }
++    }
++}
++
++impl<V: View> SettingsWidget for PlannedFeatureWidget<V> {
++    type View = V;
++
++    fn widget_id(&self) -> &'static str {
++        self.label
++    }
++
++    fn search_terms(&self) -> &str {
++        self.search_terms
++    }
++
++    fn render(&self, _view: &V, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++        let label = render_body_item_label::<SettingsAction>(
++            self.label.to_owned(),
++            Some(styles::header_font_color(false, app)),
++            None,
++            LocalOnlyIconState::Hidden,
++            ToggleState::Disabled,
++            appearance,
++        );
++        let switch = render_ai_feature_switch(self.switch_state.clone(), false, false, (), app);
++        let description = self.description;
++        Hoverable::new(self.mouse_state.clone(), move |mouse_state| {
++            let row = Flex::column()
++                .with_child(build_toggle_element(label, switch, appearance, None))
++                .with_child(render_ai_setting_description(description, false, app))
++                .finish();
++            let mut stack = Stack::new().with_child(row);
++            if mouse_state.is_hovered() {
++                stack.add_positioned_child(
++                    appearance
++                        .ui_builder()
++                        .tool_tip(NOT_IMPLEMENTED_TOOLTIP.to_owned())
++                        .build()
++                        .finish(),
++                    OffsetPositioning::offset_from_parent(
++                        vec2f(0., -3.),
++                        ParentOffsetBounds::Unbounded,
++                        ParentAnchor::TopLeft,
++                        ChildAnchor::BottomLeft,
++                    ),
++                );
++            }
++            stack.finish()
++        })
++        .finish()
++    }
++}
+diff --git a/app/src/settings_view/cli_agents_page.rs b/app/src/settings_view/cli_agents_page.rs
+index 9f73ff3..82a3dba 100644
+--- a/app/src/settings_view/cli_agents_page.rs
++++ b/app/src/settings_view/cli_agents_page.rs
+@@ -1,4 +1,5 @@
+-//! The "Third party CLI agents" settings page, shown under the Agents umbrella.
++//! The "Third party CLI agents" settings page, shown under the Agents umbrella. Embedded
++//! (`remote_tty`) builds show its rows on the AI page instead (see [`CliAgentsHost`]).
+ //!
+ //! Everything on this page controls third-party coding agents (Claude Code,
+ //! Codex, Gemini CLI) rather than Warp's own AI, so its settings are always
+@@ -6,6 +7,7 @@
+ 
+ use std::cell::RefCell;
+ use std::collections::HashMap;
++use std::marker::PhantomData;
+ 
+ use enum_iterator::all;
+ use markdown_parser::{FormattedText, FormattedTextFragment, FormattedTextLine};
+@@ -53,17 +55,29 @@ use crate::{TelemetryEvent, send_telemetry_from_ctx};
+ 
+ const PAGE_TITLE: &str = "Third party CLI agents";
+ 
+-pub struct CLIAgentsPageView {
+-    page: PageType<Self>,
++/// A settings page that shows the third-party CLI agent rows. They live on their own page in
++/// Warp, and on the single AI page in embedded (`remote_tty`) builds.
++pub(super) trait CliAgentsHost:
++    View + TypedActionView<Action: Clone + PartialEq> + Sized + 'static
++{
++    fn cli_agents(&self) -> &CliAgentsState<Self>;
++    fn cli_agents_mut(&mut self) -> &mut CliAgentsState<Self>;
++    fn wrap_cli_action(action: CLIAgentsPageAction) -> Self::Action;
++    /// Called when Escape is pressed in the command editor.
++    fn focus_modal(ctx: &mut ViewContext<Self>);
++}
++
++/// The child views and mouse states the CLI agent rows need, owned by their host page.
++pub(super) struct CliAgentsState<H: CliAgentsHost> {
+     local_only_icon_tooltip_states: RefCell<HashMap<String, MouseStateHandle>>,
+     cli_agent_footer_command_editor: ViewHandle<SubmittableTextInput>,
+     cli_agent_footer_command_mouse_state_handles: Vec<MouseStateHandle>,
+-    cli_agent_footer_command_agent_dropdowns: Vec<ViewHandle<Dropdown<CLIAgentsPageAction>>>,
++    cli_agent_footer_command_agent_dropdowns: Vec<ViewHandle<Dropdown<H::Action>>>,
+     cli_agent_toolbar_inline_editor: ViewHandle<AgentToolbarInlineEditor>,
+ }
+ 
+-impl CLIAgentsPageView {
+-    pub fn new(ctx: &mut ViewContext<Self>) -> Self {
++impl<H: CliAgentsHost> CliAgentsState<H> {
++    pub(super) fn new(ctx: &mut ViewContext<H>) -> Self {
+         let cli_agent_footer_command_editor = ctx.add_typed_action_view(|ctx| {
+             let mut input =
+                 SubmittableTextInput::new(ctx).validate_on_edit(|s| Regex::new(s).is_ok());
+@@ -83,17 +97,10 @@ impl CLIAgentsPageView {
+                         settings.add_cli_agent_footer_enabled_command(command, ctx);
+                     });
+                 }
+-                SubmittableTextInputEvent::Escape => ctx.emit(CLIAgentsPageEvent::FocusModal),
++                SubmittableTextInputEvent::Escape => H::focus_modal(ctx),
+             },
+         );
+ 
+-        let cli_agent_footer_command_mouse_state_handles = AISettings::as_ref(ctx)
+-            .cli_agent_footer_enabled_commands
+-            .value()
+-            .keys()
+-            .map(|_| Default::default())
+-            .collect();
+-
+         let cli_agent_toolbar_inline_editor = ctx.add_typed_action_view(|ctx| {
+             AgentToolbarInlineEditor::new(AgentToolbarEditorMode::CLIAgent, ctx)
+         });
+@@ -103,43 +110,34 @@ impl CLIAgentsPageView {
+             // list, so both the per-row mouse states and the per-row agent
+             // dropdowns have to be rebuilt to stay index-aligned with it.
+             if let AISettingsChangedEvent::CLIAgentToolbarEnabledCommands { .. } = event {
+-                me.cli_agent_footer_command_mouse_state_handles = AISettings::as_ref(ctx)
+-                    .cli_agent_footer_enabled_commands
+-                    .value()
+-                    .keys()
+-                    .map(|_| Default::default())
+-                    .collect();
+-                me.cli_agent_footer_command_agent_dropdowns = Self::create_cli_agent_dropdowns(ctx);
++                let mouse_states = Self::create_mouse_state_handles(ctx);
++                let dropdowns = Self::create_cli_agent_dropdowns(ctx);
++                let state = me.cli_agents_mut();
++                state.cli_agent_footer_command_mouse_state_handles = mouse_states;
++                state.cli_agent_footer_command_agent_dropdowns = dropdowns;
+             }
+             ctx.notify();
+         });
+ 
+         Self {
+-            page: Self::build_page(),
+             local_only_icon_tooltip_states: Default::default(),
+             cli_agent_footer_command_editor,
+-            cli_agent_footer_command_mouse_state_handles,
++            cli_agent_footer_command_mouse_state_handles: Self::create_mouse_state_handles(ctx),
+             cli_agent_footer_command_agent_dropdowns: Self::create_cli_agent_dropdowns(ctx),
+             cli_agent_toolbar_inline_editor,
+         }
+     }
+ 
+-    fn build_page() -> PageType<Self> {
+-        let widgets: Vec<Box<dyn SettingsWidget<View = Self>>> = vec![
+-            Box::new(CLIAgentWidget::default()),
+-            Box::new(CLIAgentAutoToggleRichInputWidget::default()),
+-            Box::new(CLIAgentAutoOpenRichInputWidget::default()),
+-            Box::new(CLIAgentAutoDismissRichInputWidget::default()),
+-            Box::new(CLIAgentSubmitRichInputWidget::default()),
+-            Box::new(CLIAgentCommandsWidget),
+-            Box::new(CLIAgentToolbarLayoutWidget),
+-        ];
+-        PageType::new_uncategorized(widgets, Some(PageTitle::new(PAGE_TITLE)))
++    fn create_mouse_state_handles(ctx: &ViewContext<H>) -> Vec<MouseStateHandle> {
++        AISettings::as_ref(ctx)
++            .cli_agent_footer_enabled_commands
++            .value()
++            .keys()
++            .map(|_| Default::default())
++            .collect()
+     }
+ 
+-    fn create_cli_agent_dropdowns(
+-        ctx: &mut ViewContext<Self>,
+-    ) -> Vec<ViewHandle<Dropdown<CLIAgentsPageAction>>> {
++    fn create_cli_agent_dropdowns(ctx: &mut ViewContext<H>) -> Vec<ViewHandle<Dropdown<H::Action>>> {
+         let entries: Vec<(String, CLIAgent)> = AISettings::as_ref(ctx)
+             .cli_agent_footer_enabled_commands
+             .value()
+@@ -167,10 +165,10 @@ impl CLIAgentsPageView {
+                         let icon = agent.icon();
+                         let mut fields = MenuItemFields::new(agent.display_name())
+                             .with_on_select_action(DropdownAction::select_action_and_close(
+-                                CLIAgentsPageAction::SetCLIAgentForCommand {
++                                H::wrap_cli_action(CLIAgentsPageAction::SetCLIAgentForCommand {
+                                     pattern: pattern_clone.clone(),
+                                     agent: Some(agent),
+-                                },
++                                }),
+                             ));
+                         if let Some(icon) = icon {
+                             fields = fields.with_icon(icon);
+@@ -181,10 +179,10 @@ impl CLIAgentsPageView {
+                     items.push(
+                         MenuItemFields::new("Other")
+                             .with_on_select_action(DropdownAction::select_action_and_close(
+-                                CLIAgentsPageAction::SetCLIAgentForCommand {
++                                H::wrap_cli_action(CLIAgentsPageAction::SetCLIAgentForCommand {
+                                     pattern: pattern_clone.clone(),
+                                     agent: None,
+-                                },
++                                }),
+                             ))
+                             .into_item(),
+                     );
+@@ -213,6 +211,61 @@ impl CLIAgentsPageView {
+     }
+ }
+ 
++
++pub struct CLIAgentsPageView {
++    page: PageType<Self>,
++    cli: CliAgentsState<Self>,
++}
++
++impl CLIAgentsPageView {
++    pub fn new(ctx: &mut ViewContext<Self>) -> Self {
++        Self {
++            page: Self::build_page(),
++            cli: CliAgentsState::new(ctx),
++        }
++    }
++
++    fn build_page() -> PageType<Self> {
++        let widgets: Vec<Box<dyn SettingsWidget<View = Self>>> = vec![
++            Box::new(CLIAgentWidget::<Self>::default()),
++            Box::new(CLIAgentAutoToggleRichInputWidget::default()),
++            Box::new(CLIAgentAutoOpenRichInputWidget::default()),
++            Box::new(CLIAgentAutoDismissRichInputWidget::default()),
++            Box::new(CLIAgentSubmitRichInputWidget::default()),
++            Box::new(CLIAgentCommandsWidget::<Self>::default()),
++            Box::new(CLIAgentToolbarLayoutWidget::<Self>::default()),
++        ];
++        PageType::new_uncategorized(widgets, Some(PageTitle::new(PAGE_TITLE)))
++    }
++}
++
++impl CliAgentsHost for CLIAgentsPageView {
++    fn cli_agents(&self) -> &CliAgentsState<Self> {
++        &self.cli
++    }
++
++    fn cli_agents_mut(&mut self) -> &mut CliAgentsState<Self> {
++        &mut self.cli
++    }
++
++    fn wrap_cli_action(action: CLIAgentsPageAction) -> CLIAgentsPageAction {
++        action
++    }
++
++    fn focus_modal(ctx: &mut ViewContext<Self>) {
++        ctx.emit(CLIAgentsPageEvent::FocusModal);
++    }
++}
++
++/// The CLI agent rows without Rich Input, for another page to show (the embedded AI page).
++pub(super) fn cli_agent_widgets<H: CliAgentsHost>() -> Vec<Box<dyn SettingsWidget<View = H>>> {
++    vec![
++        Box::new(CLIAgentWidget::<H>::default()),
++        Box::new(CLIAgentCommandsWidget::<H>::default()),
++        Box::new(CLIAgentToolbarLayoutWidget::<H>::default()),
++    ]
++}
++
+ impl Entity for CLIAgentsPageView {
+     type Event = CLIAgentsPageEvent;
+ }
+@@ -249,6 +302,15 @@ impl TypedActionView for CLIAgentsPageView {
+     type Action = CLIAgentsPageAction;
+ 
+     fn handle_action(&mut self, action: &Self::Action, ctx: &mut ViewContext<Self>) {
++        handle_cli_action(action, ctx);
++    }
++}
++
++/// Handles a CLI agent row's action for whichever page shows the rows.
++pub(super) fn handle_cli_action<H: CliAgentsHost>(
++    action: &CLIAgentsPageAction,
++    ctx: &mut ViewContext<H>,
++) {
+         match action {
+             CLIAgentsPageAction::ToggleCLIAgentToolbar => {
+                 match AISettings::handle(ctx).update(ctx, |settings, ctx| {
+@@ -313,7 +375,6 @@ impl TypedActionView for CLIAgentsPageView {
+                 });
+             }
+         }
+-    }
+ }
+ 
+ impl SettingsPageMeta for CLIAgentsPageView {
+@@ -405,16 +466,25 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
+ /// which changes whenever the widget moves modules.
+ #[cfg(not(target_family = "wasm"))]
+ pub fn cli_agent_settings_widget_id() -> &'static str {
+-    CLIAgentWidget::static_widget_id()
++    CLIAgentWidget::<CLIAgentsPageView>::static_widget_id()
+ }
+ 
+-#[derive(Default)]
+-struct CLIAgentWidget {
++struct CLIAgentWidget<H> {
+     cli_agent_footer_toggle: SwitchStateHandle,
++    host: PhantomData<fn() -> H>,
+ }
+ 
+-impl SettingsWidget for CLIAgentWidget {
+-    type View = CLIAgentsPageView;
++impl<H> Default for CLIAgentWidget<H> {
++    fn default() -> Self {
++        Self {
++            cli_agent_footer_toggle: Default::default(),
++            host: PhantomData,
++        }
++    }
++}
++
++impl<H: CliAgentsHost> SettingsWidget for CLIAgentWidget<H> {
++    type View = H;
+ 
+     fn search_terms(&self) -> &str {
+         "third party cli coding agent claude codex gemini toolbar footer quick actions show"
+@@ -430,11 +500,11 @@ impl SettingsWidget for CLIAgentWidget {
+ 
+         let cli_agent_footer_toggle = render_ai_setting_toggle::<ShouldRenderCLIAgentToolbar>(
+             "Show coding agent toolbar",
+-            CLIAgentsPageAction::ToggleCLIAgentToolbar,
++            H::wrap_cli_action(CLIAgentsPageAction::ToggleCLIAgentToolbar),
+             *ai_settings.should_render_cli_agent_footer,
+             true,
+             self.cli_agent_footer_toggle.clone(),
+-            &view.local_only_icon_tooltip_states,
++            &view.cli_agents().local_only_icon_tooltip_states,
+             app,
+         );
+ 
+@@ -521,7 +591,7 @@ impl SettingsWidget for CLIAgentAutoToggleRichInputWidget {
+             LocalOnlyIconState::for_setting(
+                 AutoToggleRichInput::storage_key(),
+                 AutoToggleRichInput::sync_to_cloud(),
+-                &mut view.local_only_icon_tooltip_states.borrow_mut(),
++                &mut view.cli.local_only_icon_tooltip_states.borrow_mut(),
+                 app,
+             ),
+             ToggleState::Enabled,
+@@ -575,7 +645,7 @@ impl SettingsWidget for CLIAgentAutoOpenRichInputWidget {
+             *AISettings::as_ref(app).auto_open_rich_input_on_cli_agent_start,
+             true,
+             self.toggle.clone(),
+-            &view.local_only_icon_tooltip_states,
++            &view.cli.local_only_icon_tooltip_states,
+             app,
+         )
+     }
+@@ -613,7 +683,7 @@ impl SettingsWidget for CLIAgentAutoDismissRichInputWidget {
+             *AISettings::as_ref(app).auto_dismiss_rich_input_after_submit,
+             true,
+             self.toggle.clone(),
+-            &view.local_only_icon_tooltip_states,
++            &view.cli.local_only_icon_tooltip_states,
+             app,
+         )
+     }
+@@ -651,16 +721,22 @@ impl SettingsWidget for CLIAgentSubmitRichInputWidget {
+             *AISettings::as_ref(app).submit_on_ctrl_enter,
+             true,
+             self.toggle.clone(),
+-            &view.local_only_icon_tooltip_states,
++            &view.cli.local_only_icon_tooltip_states,
+             app,
+         )
+     }
+ }
+ 
+-struct CLIAgentCommandsWidget;
++struct CLIAgentCommandsWidget<H>(PhantomData<fn() -> H>);
+ 
+-impl SettingsWidget for CLIAgentCommandsWidget {
+-    type View = CLIAgentsPageView;
++impl<H> Default for CLIAgentCommandsWidget<H> {
++    fn default() -> Self {
++        Self(PhantomData)
++    }
++}
++
++impl<H: CliAgentsHost> SettingsWidget for CLIAgentCommandsWidget<H> {
++    type View = H;
+ 
+     fn search_terms(&self) -> &str {
+         "third party cli coding agent claude codex gemini toolbar commands regex patterns"
+@@ -692,6 +768,7 @@ impl SettingsWidget for CLIAgentCommandsWidget {
+                 .build()
+                 .finish(),
+         );
++        let view = view.cli_agents();
+         list_column.add_child(ChildView::new(&view.cli_agent_footer_command_editor).finish());
+ 
+         let background = appearance.theme().surface_1();
+@@ -705,8 +782,9 @@ impl SettingsWidget for CLIAgentCommandsWidget {
+         let len = items.len();
+         for (rev_i, pattern) in items.iter().rev().enumerate() {
+             let original_i = len - 1 - rev_i;
+-            let remove_action =
+-                CLIAgentsPageAction::RemoveCLIAgentToolbarEnabledCommand(pattern.clone());
++            let remove_action = H::wrap_cli_action(
++                CLIAgentsPageAction::RemoveCLIAgentToolbarEnabledCommand(pattern.clone()),
++            );
+             let mouse_state = view
+                 .cli_agent_footer_command_mouse_state_handles
+                 .get(original_i)
+@@ -789,10 +867,16 @@ impl SettingsWidget for CLIAgentCommandsWidget {
+     }
+ }
+ 
+-struct CLIAgentToolbarLayoutWidget;
++struct CLIAgentToolbarLayoutWidget<H>(PhantomData<fn() -> H>);
+ 
+-impl SettingsWidget for CLIAgentToolbarLayoutWidget {
+-    type View = CLIAgentsPageView;
++impl<H> Default for CLIAgentToolbarLayoutWidget<H> {
++    fn default() -> Self {
++        Self(PhantomData)
++    }
++}
++
++impl<H: CliAgentsHost> SettingsWidget for CLIAgentToolbarLayoutWidget<H> {
++    type View = H;
+ 
+     fn search_terms(&self) -> &str {
+         "third party cli coding agent toolbar layout chip chips rearrange re-arrange"
+@@ -812,6 +896,6 @@ impl SettingsWidget for CLIAgentToolbarLayoutWidget {
+             return Empty::new().finish();
+         }
+ 
+-        render_toolbar_layout_editor(&view.cli_agent_toolbar_inline_editor, appearance)
++        render_toolbar_layout_editor(&view.cli_agents().cli_agent_toolbar_inline_editor, appearance)
+     }
+ }
+diff --git a/app/src/settings_view/mod.rs b/app/src/settings_view/mod.rs
+index 2dcdfc1..bb414dd 100644
+--- a/app/src/settings_view/mod.rs
++++ b/app/src/settings_view/mod.rs
+@@ -350,6 +350,8 @@ impl Display for SettingsSection {
+             SettingsSection::SharedBlocks => write!(f, "Shared blocks"),
+             SettingsSection::Scripting => write!(f, "Scripting"),
+             SettingsSection::WarpDrive => write!(f, "Warp Drive"),
++            // Embedded builds have no Warp Agent, only the host's AI provider.
++            SettingsSection::WarpAgent if cfg!(feature = "remote_tty") => write!(f, "AI"),
+             SettingsSection::WarpAgent => write!(f, "Warp Agent"),
+             SettingsSection::AgentProfiles => write!(f, "Profiles"),
+             SettingsSection::AgentMCPServers => write!(f, "MCP servers"),
+@@ -1052,6 +1054,13 @@ enum NavStop {
+     },
+ }
+ 
++fn nav_items_contain(nav_items: &[SettingsNavItem], section: SettingsSection) -> bool {
++    nav_items.iter().any(|item| match item {
++        SettingsNavItem::Page(page) => *page == section,
++        SettingsNavItem::Umbrella(umbrella) => umbrella.contains(section),
++    })
++}
++
+ /// Builds the ordered list of arrow-key nav stops from `nav_items`.
+ ///
+ /// `is_visible` decides which sections are currently shown in the sidebar;
+@@ -1460,12 +1469,42 @@ impl SettingsView {
+             );
+         }
+ 
++        // Embedded (`remote_tty`) builds have no Warp account, cloud or Warp Agent: the sidebar
++        // keeps one plain AI page (with the CLI agent rows) and the local terminal pages.
++        if cfg!(feature = "remote_tty") {
++            nav_items = vec![SettingsNavItem::Page(SettingsSection::WarpAgent)];
++            nav_items.extend(
++                [
++                    SettingsSection::Appearance,
++                    SettingsSection::Features,
++                    SettingsSection::Keybindings,
++                    SettingsSection::Warpify,
++                    SettingsSection::Scripting,
++                    SettingsSection::Privacy,
++                    SettingsSection::About,
++                ]
++                .into_iter()
++                .filter(|section| {
++                    *section != SettingsSection::Scripting
++                        || FeatureFlag::WarpControlCli.is_enabled()
++                })
++                .map(SettingsNavItem::Page),
++            );
++        }
++
+         let initial_page = match page {
+             Some(SettingsSection::Scripting) if !FeatureFlag::WarpControlCli.is_enabled() => {
+                 SettingsSection::Account
+             }
+             other => other.unwrap_or_default(),
+         };
++        let initial_page = if cfg!(feature = "remote_tty")
++            && !nav_items_contain(&nav_items, initial_page)
++        {
++            SettingsSection::WarpAgent
++        } else {
++            initial_page
++        };
+ 
+         // Auto-expand the umbrella if the initial page is one of its subpages.
+         for item in &mut nav_items {
+@@ -2046,6 +2085,13 @@ impl SettingsView {
+         allow_steal_focus: bool,
+         ctx: &mut ViewContext<Self>,
+     ) {
++        // Embedded builds send links to hidden pages (e.g. the CLI agents page, whose rows live
++        // on the AI page there) to the AI page.
++        let section = if cfg!(feature = "remote_tty") && !self.is_in_nav(section) {
++            SettingsSection::WarpAgent
++        } else {
++            section
++        };
+         // Every nav target owns its backing page. Check it exists.
+         if self.settings_page(section).is_none() {
+             return;
+@@ -2114,7 +2160,16 @@ impl SettingsView {
+         });
+     }
+ 
++    fn is_in_nav(&self, section: SettingsSection) -> bool {
++        nav_items_contain(&self.nav_items, section)
++    }
++
+     fn should_render_page(&self, settings_page: &SettingsPage, app: &AppContext) -> bool {
++        // Embedded builds keep the other pages constructed (keybindings still dispatch to them)
++        // but never show them, so search can't land on a page missing from the sidebar.
++        if cfg!(feature = "remote_tty") && !self.is_in_nav(settings_page.section) {
++            return false;
++        }
+         match &settings_page.view_handle {
+             SettingsPageViewHandle::Main(v) => v.as_ref(app).should_render(app),
+             SettingsPageViewHandle::Teams(v) => v.as_ref(app).should_render(app),
+diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
+index 8f92d4b..50befb3 100644
+--- a/app/src/settings_view/warp_agent_page.rs
++++ b/app/src/settings_view/warp_agent_page.rs
+@@ -50,10 +50,13 @@ use warpui::{
+ };
+ 
+ use super::ai_shared::{
+-    render_ai_feature_switch, render_ai_setting_description, render_ai_setting_label,
+-    render_ai_setting_toggle, render_toolbar_layout_editor, styles,
++    PlannedFeatureWidget, render_ai_feature_switch, render_ai_setting_description,
++    render_ai_setting_label, render_ai_setting_toggle, render_toolbar_layout_editor, styles,
+     update_editor_interaction_state,
+ };
++use super::cli_agents_page::{
++    CLIAgentsPageAction, CliAgentsHost, CliAgentsState, cli_agent_widgets, handle_cli_action,
++};
+ use super::custom_inference_modal::{
+     CustomEndpointModal, CustomEndpointModalEvent, CustomEndpointModalViewState,
+ };
+@@ -693,6 +696,9 @@ pub struct WarpAgentPageView {
+     /// Identifies the ChatGPT connect attempt this page started, if one is in
+     /// flight, so a stale timeout can't cancel a newer attempt.
+     chatgpt_oauth_attempt: Option<Uuid>,
++
++    /// The third-party CLI agent rows, shown on this page in embedded (`remote_tty`) builds.
++    cli_agents: CliAgentsState<Self>,
+ }
+ 
+ impl WarpAgentPageView {
+@@ -1213,8 +1219,10 @@ impl WarpAgentPageView {
+             );
+         }
+ 
++        let cli_agents = CliAgentsState::new(ctx);
+         Self {
+             page: Self::build_page(ctx),
++            cli_agents,
+             self_handle,
+             voice_input_toggle_key_dropdown,
+             voice_input_language_dropdown,
+@@ -2294,8 +2302,52 @@ impl WarpAgentPageView {
+         let host_expanded_model_widget = HostAiModelWidget::new(HostAiModelKind::Expanded, ctx);
+         let host_expanded_effort_widget = HostAiEffortWidget::new(ctx);
+         let host_recent_commands_widget = HostAiRecentCommandsWidget::new(ctx);
+-        let ai_settings = AISettings::as_ref(ctx);
+ 
++        // Embedded (`remote_tty`) builds have no Warp account or Warp AI: one plain "AI" page
++        // with the host's provider, `#`, planned suggestions and the CLI agent toolbar.
++        if cfg!(feature = "remote_tty") {
++            let categories: Vec<Category<Self>> = vec![
++                // The key is entered here and stored by the host, never in Warp.
++                Category::new(
++                    "AI provider",
++                    vec![
++                        Box::new(HostApiKeyWidget::new(ctx)),
++                        Box::new(host_fast_model_widget),
++                        Box::new(host_expanded_model_widget),
++                        Box::new(host_expanded_effort_widget),
++                        Box::new(HostAiPrivateRoutingWidget::default()),
++                        Box::new(host_recent_commands_widget),
++                    ],
++                ),
++                Category::new(
++                    "Command search (#)",
++                    vec![
++                        Box::new(AiCommandSearchHashTriggerWidget::default()),
++                        Box::new(ai_command_search_debounce_widget),
++                        Box::new(ShowInputHintTextWidget::default()),
++                    ],
++                ),
++                Category::new(
++                    "Suggestions",
++                    vec![
++                        Box::new(PlannedFeatureWidget::new(
++                            "Next Command",
++                            NEXT_COMMAND_DESCRIPTION,
++                            "ai a.i. next command suggestions autosuggestions planned",
++                        )),
++                        Box::new(PlannedFeatureWidget::new(
++                            "Prompt Suggestions",
++                            PROMPT_SUGGESTIONS_DESCRIPTION,
++                            "ai a.i. prompt suggestions planned",
++                        )),
++                    ],
++                ),
++                Category::new("Third-party CLI agents", cli_agent_widgets()),
++            ];
++            return PageType::new_categorized(categories, Some(PageTitle::new("AI")));
++        }
++
++        let ai_settings = AISettings::as_ref(ctx);
+         let mut categories: Vec<Category<Self>> = Vec::new();
+ 
+         if ai_settings
+@@ -2368,25 +2420,6 @@ impl WarpAgentPageView {
+             ],
+         ));
+ 
+-        // Embedded (`remote_tty`) builds answer AI requests with the host app's own provider;
+-        // the key is entered here and stored by the host, never in Warp. Listed first.
+-        if cfg!(feature = "remote_tty") {
+-            categories.insert(
+-                0,
+-                Category::new(
+-                    "AI provider",
+-                    vec![
+-                        Box::new(HostApiKeyWidget::new(ctx)),
+-                        Box::new(host_fast_model_widget),
+-                        Box::new(host_expanded_model_widget),
+-                        Box::new(host_expanded_effort_widget),
+-                        Box::new(HostAiPrivateRoutingWidget::default()),
+-                        Box::new(host_recent_commands_widget),
+-                    ],
+-                ),
+-            );
+-        }
+-
+         let page_view_handle = ctx.handle();
+         categories.push(Category::with_header(
+             CategoryHeader::new("Custom Inference").with_trailing_element(
+@@ -2565,8 +2598,27 @@ impl Entity for WarpAgentPageView {
+     type Event = WarpAgentPageEvent;
+ }
+ 
++impl CliAgentsHost for WarpAgentPageView {
++    fn cli_agents(&self) -> &CliAgentsState<Self> {
++        &self.cli_agents
++    }
++
++    fn cli_agents_mut(&mut self) -> &mut CliAgentsState<Self> {
++        &mut self.cli_agents
++    }
++
++    fn wrap_cli_action(action: CLIAgentsPageAction) -> WarpAgentPageAction {
++        WarpAgentPageAction::CLIAgents(action)
++    }
++
++    fn focus_modal(ctx: &mut ViewContext<Self>) {
++        ctx.emit(WarpAgentPageEvent::FocusModal);
++    }
++}
++
+ #[derive(Debug, Clone, PartialEq)]
+ pub enum WarpAgentPageAction {
++    CLIAgents(CLIAgentsPageAction),
+     OpenUrl(String),
+     SetVoiceInputToggleKey(VoiceInputToggleKey),
+     SetVoiceInputLanguage(String),
+@@ -2635,6 +2687,7 @@ impl TypedActionView for WarpAgentPageView {
+ 
+     fn handle_action(&mut self, action: &Self::Action, ctx: &mut ViewContext<Self>) {
+         match action {
++            WarpAgentPageAction::CLIAgents(action) => handle_cli_action(action, ctx),
+             WarpAgentPageAction::OpenUrl(url) => {
+                 ctx.open_url(url.as_str());
+             }

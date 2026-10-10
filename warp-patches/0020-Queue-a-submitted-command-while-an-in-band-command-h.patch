@@ -1,0 +1,104 @@
+From 206f2f9ba874050b1e4c5d0980a8154915423bb5 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 17:56:25 -0700
+Subject: [PATCH 20/49] Queue a submitted command while an in-band command
+ holds the shell
+
+Enter was silently dropped when a completions generator (an in-band
+command) was running, which over a remote PTY happens often right after
+typing. Queue it as the pending command instead; it runs when the
+in-band block completes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/terminal/input.rs | 63 +++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 61 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/terminal/input.rs b/app/src/terminal/input.rs
+index 2e12ac0..8db11ec 100644
+--- a/app/src/terminal/input.rs
++++ b/app/src/terminal/input.rs
+@@ -7801,6 +7801,65 @@ impl Input {
+         });
+     }
+ 
++    /// Like [`Self::try_execute_command`] for the command the user submitted from the input
++    /// buffer, except that while an in-band command (e.g. a completions generator) briefly holds
++    /// the shell, the command is queued instead of dropped. It then runs from the buffer, which
++    /// stays read-only until then, once that block completes (see `execute_pending_command`).
++    fn try_execute_or_queue_buffer_command(
++        &mut self,
++        command: &str,
++        ctx: &mut ViewContext<Self>,
++    ) -> bool {
++        if let CanExecuteCommand::No(reason) = self.can_execute_command(ctx) {
++            let in_band_command_running = {
++                let model = self.model.lock();
++                !model.shared_session_status().is_sharer_or_viewer()
++                    && model.block_list().active_block().is_in_band_command_block()
++            };
++            if in_band_command_running && !reason.is_existing_active_command() {
++                self.has_pending_command = true;
++                self.editor.update(ctx, |editor, ctx| {
++                    editor.set_interaction_state(InteractionState::Selectable, ctx);
++                });
++                self.retry_queued_buffer_command(0, ctx);
++                return false;
++            }
++        }
++        self.try_execute_command(command, ctx)
++    }
++
++    /// Retries a command queued by [`Self::try_execute_or_queue_buffer_command`] until the shell
++    /// is free. Gives up after a few seconds and makes the buffer editable again, so the input
++    /// never stays locked.
++    fn retry_queued_buffer_command(&mut self, attempt: u32, ctx: &mut ViewContext<Self>) {
++        const RETRY_INTERVAL: Duration = Duration::from_millis(100);
++        const MAX_ATTEMPTS: u32 = 50;
++        let _ = ctx.spawn(
++            async move { warpui::r#async::Timer::after(RETRY_INTERVAL).await },
++            move |input, _, ctx| {
++                if !input.has_pending_command {
++                    return;
++                }
++                input.execute_pending_command(ctx);
++                if !input.has_pending_command {
++                    return;
++                }
++                if attempt + 1 < MAX_ATTEMPTS {
++                    input.retry_queued_buffer_command(attempt + 1, ctx);
++                } else {
++                    log::warn!(
++                        "Gave up running a queued command: {:?}",
++                        input.can_execute_command(ctx)
++                    );
++                    input.has_pending_command = false;
++                    input.editor.update(ctx, |editor, ctx| {
++                        editor.set_interaction_state(InteractionState::Editable, ctx);
++                    });
++                }
++            },
++        );
++    }
++
+     pub fn try_execute_command(&mut self, command: &str, ctx: &mut ViewContext<Self>) -> bool {
+         self.try_execute_command_with_options(command, false, ctx)
+     }
+@@ -9074,7 +9133,7 @@ impl Input {
+                 self.close_input_suggestions(/*should_focus_input=*/ true, ctx);
+ 
+                 let command = self.get_command(ctx);
+-                self.try_execute_command(&command, ctx);
++                self.try_execute_or_queue_buffer_command(&command, ctx);
+ 
+                 ctx.emit_a11y_content(AccessibilityContent::new_without_help(
+                     format!("Executed: {command}"),
+@@ -14276,7 +14335,7 @@ impl Input {
+             }
+ 
+             let command = self.get_command(ctx);
+-            if !self.try_execute_command(&command, ctx) {
++            if !self.try_execute_or_queue_buffer_command(&command, ctx) {
+                 return;
+             }
+             self.emit_input_buffer_submitted_telemetry(ctx);

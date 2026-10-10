@@ -1,0 +1,12 @@
+# Development-only files; scripts/package.sh adds per-platform excludes.
+.vscode/**
+scripts/**
+ROADMAP.md
+CLAUDE.md
+**/*.map
+node_modules/**/test/**
+node_modules/**/*.md
+node_modules/node-pty/src/**
+node_modules/node-pty/deps/**
+node_modules/node-pty/scripts/**
+node_modules/node-pty/typings/**

@@ -1,0 +1,234 @@
+From c2fd3b025974b86d88f37662ed778c72871b2d71 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 13:33:29 -0700
+Subject: [PATCH 05/49] embedded: host bridge for Open settings file and AI
+ command search (BYOK)
+
+Open settings file calls window.warpPanelOpenSettingsFile. AI command search (#) works without a
+Warp account and asks window.warpPanelGenerateCommands, which the host answers with its own AI
+provider.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/Cargo.toml                        |  1 +
+ app/src/ai_assistant/mod.rs           | 15 ++++++
+ app/src/platform/wasm.rs              | 68 +++++++++++++++++++++++++++
+ app/src/search/command_search/view.rs |  2 +-
+ app/src/server/server_api/ai.rs       |  6 +++
+ app/src/settings/ai.rs                |  6 +++
+ app/src/terminal/input.rs             |  6 +--
+ app/src/workspace/view.rs             | 10 +++-
+ 8 files changed, 108 insertions(+), 6 deletions(-)
+
+diff --git a/app/Cargo.toml b/app/Cargo.toml
+index beb7b53..df3ee05 100644
+--- a/app/Cargo.toml
++++ b/app/Cargo.toml
+@@ -359,6 +359,7 @@ syntect = { version = "5.0", default-features = false, features = [
+     "default-fancy",
+ ] }
+ wasm-bindgen.workspace = true
++wasm-bindgen-futures.workspace = true
+ # We need to make sure that "js" is enabled as a feature when using wasm.
+ getrandom = { version = "0.2", features = ["js"] }
+ gloo.workspace = true
+diff --git a/app/src/ai_assistant/mod.rs b/app/src/ai_assistant/mod.rs
+index b2cf1e7..2d1d05e 100644
+--- a/app/src/ai_assistant/mod.rs
++++ b/app/src/ai_assistant/mod.rs
+@@ -90,6 +90,21 @@ pub struct AIGeneratedCommandParameter {
+     description: String,
+ }
+ 
++impl AIGeneratedCommand {
++    /// Builds a command generated outside Warp's server (e.g. by an embedding host app's own AI
++    /// provider). `parameters` are `(id, description)` pairs matching `{{id}}` in `command`.
++    pub fn new(command: String, description: String, parameters: Vec<(String, String)>) -> Self {
++        Self {
++            command,
++            description,
++            parameters: parameters
++                .into_iter()
++                .map(|(id, description)| AIGeneratedCommandParameter { id, description })
++                .collect(),
++        }
++    }
++}
++
+ impl From<AIGeneratedCommand> for Workflow {
+     fn from(ai_command: AIGeneratedCommand) -> Self {
+         // Note that we use the AI generated description as the _title_ of the workflow.
+diff --git a/app/src/platform/wasm.rs b/app/src/platform/wasm.rs
+index d29593a..9a299bc 100644
+--- a/app/src/platform/wasm.rs
++++ b/app/src/platform/wasm.rs
+@@ -26,9 +26,77 @@ mod ffi {
+     extern "C" {
+         #[wasm_bindgen(js_name = "warpUserHandoff", catch)]
+         pub fn user_handoff() -> Result<Option<String>, JsValue>;
++
++        #[wasm_bindgen(js_name = "warpPanelOpenSettingsFile", catch)]
++        pub fn open_settings_file_in_host() -> Result<(), JsValue>;
++
++        #[wasm_bindgen(js_name = "warpPanelGenerateCommands", catch)]
++        pub fn generate_commands(
++            prompt: &str,
++            context_json: Option<String>,
++        ) -> Result<js_sys::Promise, JsValue>;
+     }
+ }
+ 
++#[derive(serde::Deserialize)]
++struct HostGeneratedCommand {
++    command: String,
++    description: String,
++    #[serde(default)]
++    parameters: Vec<HostCommandParameter>,
++}
++
++#[derive(serde::Deserialize)]
++struct HostCommandParameter {
++    id: String,
++    description: String,
++}
++
++/// Generates commands for AI Command Search (`#`) via the embedding host app's
++/// `window.warpPanelGenerateCommands(prompt, contextJson)`, which resolves to a JSON array of
++/// `{command, description, parameters: [{id, description}]}` or rejects with an error code
++/// (`bad_prompt`, `rate_limited`, `provider_error`, or anything else for a generic error).
++pub async fn generate_commands_in_host(
++    prompt: String,
++    ai_execution_context: Option<crate::ai_assistant::execution_context::WarpAiExecutionContext>,
++) -> Result<
++    Vec<crate::ai_assistant::AIGeneratedCommand>,
++    crate::ai_assistant::GenerateCommandsFromNaturalLanguageError,
++> {
++    use crate::ai_assistant::{AIGeneratedCommand, GenerateCommandsFromNaturalLanguageError as Error};
++
++    let context_json = ai_execution_context.and_then(|context| context.to_json_string());
++    let promise = ffi::generate_commands(&prompt, context_json).map_err(|_| Error::Other)?;
++    let result = wasm_bindgen_futures::JsFuture::from(promise)
++        .await
++        .map_err(|err| match err.as_string().as_deref() {
++            Some("bad_prompt") => Error::BadPrompt,
++            Some("rate_limited") => Error::RateLimited,
++            Some("provider_error") => Error::AiProviderError,
++            _ => Error::Other,
++        })?;
++    let json = result.as_string().ok_or(Error::Other)?;
++    let commands: Vec<HostGeneratedCommand> =
++        serde_json::from_str(&json).map_err(|_| Error::Other)?;
++    Ok(commands
++        .into_iter()
++        .map(|c| {
++            AIGeneratedCommand::new(
++                c.command,
++                c.description,
++                c.parameters.into_iter().map(|p| (p.id, p.description)).collect(),
++            )
++        })
++        .collect())
++}
++
++/// Asks the embedding host app (e.g. the VS Code panel) to open its settings file, since the web
++/// build keeps settings in localStorage rather than a file. Returns false if the host doesn't
++/// provide `window.warpPanelOpenSettingsFile`.
++pub fn open_settings_file_in_host() -> bool {
++    ffi::open_settings_file_in_host().is_ok()
++}
++
+ #[derive(Debug, Clone, Error)]
+ pub enum AuthHandoffError {
+     #[error("The host page doesn't support user handoff")]
+diff --git a/app/src/search/command_search/view.rs b/app/src/search/command_search/view.rs
+index 3ab39d4..d1d052f 100644
+--- a/app/src/search/command_search/view.rs
++++ b/app/src/search/command_search/view.rs
+@@ -229,7 +229,7 @@ impl CommandSearchView {
+             // Add data sources in lowest->highest priority order.  If results from two
+             // data sources produce the same ranking score, the data source added first
+             // will show up higher in the list (i.e.: further away from the input).
+-            if AISettings::as_ref(ctx).is_any_ai_enabled(ctx) {
++            if AISettings::as_ref(ctx).is_ai_command_search_enabled(ctx) {
+                 mixer.add_sync_source(
+                     WarpAIDataSource::new(self.ai_client.clone(), None),
+                     HashSet::from([QueryFilter::NaturalLanguage]),
+diff --git a/app/src/server/server_api/ai.rs b/app/src/server/server_api/ai.rs
+index b319361..202bc66 100644
+--- a/app/src/server/server_api/ai.rs
++++ b/app/src/server/server_api/ai.rs
+@@ -1938,6 +1938,12 @@ impl AIClient for ServerApi {
+         // TODO: use relevant context from RequestContext and deprecate usage of ai_execution_context
+         _ai_execution_context: Option<WarpAiExecutionContext>,
+     ) -> Result<Vec<AIGeneratedCommand>, GenerateCommandsFromNaturalLanguageError> {
++        // Embedded builds answer with the host app's own AI provider (bring-your-own-key).
++        #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
++        return crate::platform::wasm::generate_commands_in_host(prompt, _ai_execution_context)
++            .await;
++
++        #[allow(unreachable_code)]
+         let default_err = GenerateCommandsFromNaturalLanguageError::Other;
+ 
+         let variables = GenerateCommandsVariables {
+diff --git a/app/src/settings/ai.rs b/app/src/settings/ai.rs
+index 590d091..e0381ad 100644
+--- a/app/src/settings/ai.rs
++++ b/app/src/settings/ai.rs
+@@ -2263,6 +2263,12 @@ impl AISettings {
+         !user_workspaces.is_ai_allowed_in_remote_sessions(&scope)
+     }
+ 
++    /// Whether AI Command Search (`#`) is available. Embedded (`remote_tty`) builds answer it
++    /// with the host app's own AI provider, so it doesn't need a Warp account.
++    pub fn is_ai_command_search_enabled(&self, app: &AppContext) -> bool {
++        cfg!(feature = "remote_tty") || self.is_any_ai_enabled(app)
++    }
++
+     pub fn is_any_ai_enabled(&self, app: &AppContext) -> bool {
+         // Disable AI for anonymous and logged-out users.
+         let is_anonymous_or_logged_out = AuthStateProvider::as_ref(app)
+diff --git a/app/src/terminal/input.rs b/app/src/terminal/input.rs
+index 980bafb..6319b53 100644
+--- a/app/src/terminal/input.rs
++++ b/app/src/terminal/input.rs
+@@ -7501,8 +7501,8 @@ impl Input {
+         });
+ 
+         // Now handle the default (empty prefix) placeholder
+-        if toggled_on && AISettings::as_ref(ctx).is_any_ai_enabled(ctx) {
+-            if FeatureFlag::AgentMode.is_enabled() {
++        if toggled_on && AISettings::as_ref(ctx).is_ai_command_search_enabled(ctx) {
++            if FeatureFlag::AgentMode.is_enabled() && AISettings::as_ref(ctx).is_any_ai_enabled(ctx) {
+                 // agent_mode_hint_text now handles caching internally
+                 let hint_text = self.agent_mode_hint_text(ctx);
+                 self.editor.update(ctx, |editor, ctx| {
+@@ -10926,7 +10926,7 @@ impl Input {
+                     }
+                 }
+ 
+-                if AISettings::as_ref(ctx).is_any_ai_enabled(ctx)
++                if AISettings::as_ref(ctx).is_ai_command_search_enabled(ctx)
+                     && *InputSettings::as_ref(ctx).enable_ai_command_search_hash_trigger
+                     && self.editor_starts_with_command_search_trigger(ctx)
+                     && *edit_origin == EditOrigin::UserTyped
+diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
+index 8b0d7c1..af2c41b 100644
+--- a/app/src/workspace/view.rs
++++ b/app/src/workspace/view.rs
+@@ -24468,8 +24468,14 @@ impl TypedActionView for Workspace {
+                 ctx.notify();
+             }
+             OpenSettingsFile => {
+-                let path = crate::settings::user_preferences_toml_file_path();
+-                self.add_tab_for_code_file(path, None, ctx);
++                #[cfg(target_family = "wasm")]
++                let opened_in_host = crate::platform::wasm::open_settings_file_in_host();
++                #[cfg(not(target_family = "wasm"))]
++                let opened_in_host = false;
++                if !opened_in_host {
++                    let path = crate::settings::user_preferences_toml_file_path();
++                    self.add_tab_for_code_file(path, None, ctx);
++                }
+             }
+             OpenLocalToCloudHandoffPane {
+                 launch,

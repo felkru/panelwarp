@@ -1,0 +1,75 @@
+From 367b17adcaf82477ab59fd98fcdd5be8251e3f77 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 15:28:06 -0700
+Subject: [PATCH 43/49] Queue Enter while an in-band command holds the shell,
+ in all its phases
+
+The queue only covered an active in-band block. Enter right after typing
+(while a completion generator was in flight) was also lost when the in-band
+command was written but its block not yet started (the start was coalesced
+into it) and right after it finished, before the next block had its session
+(HistoryNotAppendable). Queue in all these states, and run the queued command
+on the last retry instead of dropping it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/terminal/input.rs | 32 ++++++++++++++++++++++++--------
+ 1 file changed, 24 insertions(+), 8 deletions(-)
+
+diff --git a/app/src/terminal/input.rs b/app/src/terminal/input.rs
+index 78a8b2d..1181c5a 100644
+--- a/app/src/terminal/input.rs
++++ b/app/src/terminal/input.rs
+@@ -7810,13 +7810,13 @@ impl Input {
+         command: &str,
+         ctx: &mut ViewContext<Self>,
+     ) -> bool {
+-        if let CanExecuteCommand::No(reason) = self.can_execute_command(ctx) {
+-            let in_band_command_running = {
+-                let model = self.model.lock();
+-                !model.shared_session_status().is_sharer_or_viewer()
+-                    && model.block_list().active_block().is_in_band_command_block()
+-            };
+-            if in_band_command_running && !reason.is_existing_active_command() {
++        if self.is_shell_held_by_in_band_command() {
++            let can_execute = self.can_execute_command(ctx);
++            let blocked_by_user_command = matches!(
++                &can_execute,
++                CanExecuteCommand::No(reason) if reason.is_existing_active_command()
++            );
++            if !blocked_by_user_command {
+                 self.has_pending_command = true;
+                 self.editor.update(ctx, |editor, ctx| {
+                     editor.set_interaction_state(InteractionState::Selectable, ctx);
+@@ -7828,6 +7828,19 @@ impl Input {
+         self.try_execute_command(command, ctx)
+     }
+ 
++    /// Whether an in-band command holds the shell: from when it's written until the next block
++    /// has its session (precmd). Starting a command then would be coalesced into the in-band
++    /// block, or refused because the new block has no session yet.
++    fn is_shell_held_by_in_band_command(&self) -> bool {
++        let model = self.model.lock();
++        let block_list = model.block_list();
++        let active_block = block_list.active_block();
++        !model.shared_session_status().is_sharer_or_viewer()
++            && (block_list.is_writing_or_executing_in_band_command()
++                || active_block.is_in_band_command_block()
++                || (block_list.is_bootstrapped() && active_block.session_id().is_none()))
++    }
++
+     /// Retries a command queued by [`Self::try_execute_or_queue_buffer_command`] until the shell
+     /// is free. Gives up after a few seconds and makes the buffer editable again, so the input
+     /// never stays locked.
+@@ -7840,7 +7853,10 @@ impl Input {
+                 if !input.has_pending_command {
+                     return;
+                 }
+-                input.execute_pending_command(ctx);
++                // On the last attempt, try anyway rather than drop the command.
++                if !input.is_shell_held_by_in_band_command() || attempt + 1 >= MAX_ATTEMPTS {
++                    input.execute_pending_command(ctx);
++                }
+                 if !input.has_pending_command {
+                     return;
+                 }

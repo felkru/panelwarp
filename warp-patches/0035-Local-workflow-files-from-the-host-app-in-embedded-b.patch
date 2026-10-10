@@ -1,0 +1,140 @@
+From cad8cec011c35fd9ae7878eb2e4944fc8ec39448 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 02:40:58 -0700
+Subject: [PATCH 35/49] Local workflow files from the host app in embedded
+ builds
+
+The web build has no file system, so the host app reads ~/.warp/workflows and the workspace's
+.warp/workflows and hands their text over (`window.warpPanelWorkflows`); Warp parses the YAML like
+desktop does and loads the workflows as local user workflows. Ctrl+R gets the local workflows
+source and its "workflows:" filter without Warp Drive, and the workflow card hides the
+environment variables row (a Warp Drive feature).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/platform/wasm.rs                    | 38 +++++++++++++++++++++
+ app/src/search/command_search/view.rs       |  9 +++++
+ app/src/search/command_search/zero_state.rs |  3 ++
+ app/src/user_config/wasm.rs                 |  3 ++
+ app/src/workflows/info_box.rs               |  4 ++-
+ 5 files changed, 56 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/platform/wasm.rs b/app/src/platform/wasm.rs
+index b64bd29..2375aed 100644
+--- a/app/src/platform/wasm.rs
++++ b/app/src/platform/wasm.rs
+@@ -36,6 +36,9 @@ mod ffi {
+         #[wasm_bindgen(js_name = "warpPanelCommandHistory", catch)]
+         pub fn command_history() -> Result<Option<String>, JsValue>;
+ 
++        #[wasm_bindgen(js_name = "warpPanelWorkflows", catch)]
++        pub fn workflows() -> Result<Option<String>, JsValue>;
++
+         #[wasm_bindgen(js_name = "warpPanelRecordCommand", catch)]
+         pub fn record_command(kind: &str, json: &str) -> Result<(), JsValue>;
+ 
+@@ -276,6 +279,41 @@ pub fn user_handoff() -> Result<Option<String>, AuthHandoffError> {
+ /// extension's storage, mirroring desktop Warp's), since the web build has no local database.
+ /// Rows mirror `persistence::model::Command`; timestamps are RFC 3339, session ids decimal strings.
+ #[cfg(feature = "remote_tty")]
++/// Local workflow files (`~/.warp/workflows` and the workspace's `.warp/workflows`), read by the
++/// host app since the web build has no file system, and parsed here like desktop Warp does.
++pub mod host_workflows {
++    use serde::Deserialize;
++
++    use crate::workflows::workflow::Workflow;
++
++    #[derive(Deserialize)]
++    struct WorkflowFile {
++        name: String,
++        text: String,
++    }
++
++    /// Every workflow in the host's files; a file can hold several YAML documents.
++    pub fn load() -> Vec<Workflow> {
++        let Some(json) = super::ffi::workflows().ok().flatten() else {
++            return Vec::new();
++        };
++        let files: Vec<WorkflowFile> = serde_json::from_str(&json).unwrap_or_default();
++        files
++            .into_iter()
++            .flat_map(|file| {
++                let parsed: Result<Vec<Workflow>, _> =
++                    serde_yaml::Deserializer::from_str(&file.text)
++                        .map(Workflow::deserialize)
++                        .collect();
++                parsed.unwrap_or_else(|error| {
++                    log::warn!("Failed to parse workflow file {}: {error}", file.name);
++                    Vec::new()
++                })
++            })
++            .collect()
++    }
++}
++
+ pub mod host_history {
+     use chrono::{DateTime, Local};
+     use serde::{Deserialize, Serialize};
+diff --git a/app/src/search/command_search/view.rs b/app/src/search/command_search/view.rs
+index ae3bb67..d2fb59f 100644
+--- a/app/src/search/command_search/view.rs
++++ b/app/src/search/command_search/view.rs
+@@ -267,6 +267,15 @@ impl CommandSearchView {
+                 );
+             }
+ 
++            // Embedded (`remote_tty`) builds have no Warp Drive, but still have the local
++            // workflow files the host app reads.
++            if cfg!(feature = "remote_tty") && !WarpDriveSettings::is_warp_drive_enabled(ctx) {
++                mixer.add_sync_source(
++                    WorkflowsDataSource::new(session_context.as_ref(), ctx),
++                    HashSet::from([QueryFilter::Workflows]),
++                );
++            }
++
+             if WarpDriveSettings::is_warp_drive_enabled(ctx) {
+                 mixer.add_sync_source(
+                     WorkflowsDataSource::new(session_context.as_ref(), ctx),
+diff --git a/app/src/search/command_search/zero_state.rs b/app/src/search/command_search/zero_state.rs
+index 6f6f1d5..62d478c 100644
+--- a/app/src/search/command_search/zero_state.rs
++++ b/app/src/search/command_search/zero_state.rs
+@@ -292,6 +292,9 @@ fn valid_query_filters(app: &AppContext) -> Vec<QueryFilter> {
+     if WarpDriveSettings::is_warp_drive_enabled(app) {
+         filters.push(QueryFilter::Workflows);
+         filters.push(QueryFilter::EnvironmentVariables);
++    } else if cfg!(feature = "remote_tty") {
++        // Local workflow files, read by the host app.
++        filters.push(QueryFilter::Workflows);
+     }
+ 
+     filters
+diff --git a/app/src/user_config/wasm.rs b/app/src/user_config/wasm.rs
+index 252e2a9..5d5b820 100644
+--- a/app/src/user_config/wasm.rs
++++ b/app/src/user_config/wasm.rs
+@@ -11,6 +11,9 @@ impl super::WarpConfig {
+     pub fn new(_ctx: &mut ModelContext<Self>) -> Self {
+         Self {
+             theme_config: WarpThemeConfig::new(),
++            // Embedded, the host app reads the local workflow files for us.
++            #[cfg(feature = "remote_tty")]
++            local_user_workflows: crate::platform::wasm::host_workflows::load(),
+             ..Default::default()
+         }
+     }
+diff --git a/app/src/workflows/info_box.rs b/app/src/workflows/info_box.rs
+index 55753ea..1586d19 100644
+--- a/app/src/workflows/info_box.rs
++++ b/app/src/workflows/info_box.rs
+@@ -772,7 +772,9 @@ impl WorkflowsMoreInfoView {
+ 
+         let mut children = vec![workflow_container];
+ 
+-        if self.workflow.should_show_env_var_selection()
++        // Environment variable collections live in Warp Drive, which embedded builds don't have.
++        if !cfg!(feature = "remote_tty")
++            && self.workflow.should_show_env_var_selection()
+             && let Some(environment_variables_selection) =
+                 self.render_environment_variables_selection(appearance, app)
+         {

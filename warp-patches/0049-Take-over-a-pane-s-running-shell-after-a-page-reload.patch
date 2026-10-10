@@ -1,0 +1,375 @@
+From bd2b012a466bb54c2da02f925b1ceb49252f8742 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Fri, 9 Oct 2026 16:11:56 -0700
+Subject: [PATCH 49/49] Take over a pane's running shell after a page reload
+
+The page asks the PTY server for its pane's shell (`pane=` on the new-session URL). When the
+server still has that shell running, it replies with `adopt` (the shell's Warp session ids and
+whether a command runs) and replays the shell's bootstrap plus its output since the latest
+prompt. Warp then skips writing the env and bootstrap script, registers the session ids so the
+replayed hooks are accepted, drops terminal replies during the replay and, while a command runs,
+its own input for a moment afterwards, so nothing stray reaches the running program.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/pane_group/mod.rs                     |   1 +
+ app/src/terminal/model/terminal_model.rs      |  15 ++
+ app/src/terminal/remote_tty/event_loop.rs     | 132 +++++++++++++++---
+ .../terminal/remote_tty/terminal_manager.rs   |   4 +
+ app/src/terminal/view/docker_sandbox/mod.rs   |   1 +
+ .../terminal/writeable_pty/pty_controller.rs  |   8 ++
+ 6 files changed, 145 insertions(+), 16 deletions(-)
+
+diff --git a/app/src/pane_group/mod.rs b/app/src/pane_group/mod.rs
+index 7ab56e0..859b383 100644
+--- a/app/src/pane_group/mod.rs
++++ b/app/src/pane_group/mod.rs
+@@ -6117,6 +6117,7 @@ impl PaneGroup {
+             if #[cfg(feature = "remote_tty")] {
+                 let terminal_init = RemoteTtyTerminalManager::create_model(
+                     startup_directory,
++                    Some(terminal_session_uuid),
+                     restored_blocks,
+                     resources,
+                     initial_size,
+diff --git a/app/src/terminal/model/terminal_model.rs b/app/src/terminal/model/terminal_model.rs
+index ec5764d..0d91de8 100644
+--- a/app/src/terminal/model/terminal_model.rs
++++ b/app/src/terminal/model/terminal_model.rs
+@@ -527,6 +527,9 @@ pub struct TerminalModel {
+     /// bootstrap init scripts. Used to validate DCS hook integrity: hooks
+     /// carrying an unrecognized session_id are rejected.
+     registered_session_ids: HashSet<SessionId>,
++    /// Sessions of a running shell this terminal took over (remote_tty adoption): their
++    /// replayed `InitShell` must not get the bootstrap script, which they already ran.
++    adopted_session_ids: HashSet<SessionId>,
+ 
+     /// The shell process backing this terminal, once it has been spawned.
+     /// Cleared on exit so that nothing reads a descriptor the pty has closed.
+@@ -1123,6 +1126,7 @@ impl TerminalModel {
+             // Start mid-way through the u32 range to avoid collisions
+             next_kitty_image_id: 2147483647,
+             registered_session_ids: HashSet::new(),
++            adopted_session_ids: HashSet::new(),
+             shell_process_info: None,
+         }
+     }
+@@ -2542,6 +2546,17 @@ impl TerminalModel {
+         self.registered_session_ids.insert(session_id);
+     }
+ 
++    /// Registers a session of a shell that's bootstrapped already (see `adopted_session_ids`).
++    pub fn register_adopted_session_id(&mut self, session_id: SessionId) {
++        self.registered_session_ids.insert(session_id);
++        self.adopted_session_ids.insert(session_id);
++    }
++
++    /// Whether `InitShell` for this session is a replay of an adopted shell's (once per session).
++    pub fn take_adopted_session_id(&mut self, session_id: SessionId) -> bool {
++        self.adopted_session_ids.remove(&session_id)
++    }
++
+     pub fn needs_bracketed_paste(&mut self) -> bool {
+         delegate!(self.needs_bracketed_paste())
+     }
+diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
+index e245df2..a10c501 100644
+--- a/app/src/terminal/remote_tty/event_loop.rs
++++ b/app/src/terminal/remote_tty/event_loop.rs
+@@ -18,6 +18,7 @@ use websocket::{Message, Sink, Stream, WebSocket, WebsocketMessage as _};
+ use crate::terminal::bootstrap::init_shell_script_for_shell;
+ use crate::terminal::event_listener::ChannelEventListener;
+ use crate::terminal::model::ansi::Processor;
++use crate::terminal::model::session::SessionId;
+ use crate::settings::SshSettings;
+ use crate::terminal::session_settings::SessionSettings;
+ use crate::terminal::warpify::settings::WarpifySettings;
+@@ -87,6 +88,11 @@ const SHELL_START_QUIET: Duration = Duration::from_millis(100);
+ /// How long Warp waits for the shell's first output and for it to be quiet.
+ const SHELL_START_TIMEOUT: Duration = Duration::from_secs(2);
+ 
++/// How long Warp's own writes stay dropped after the replay of a shell that's running a command:
++/// what Warp types in reaction to the replayed prompt (in-band commands) arrives within this time
++/// and must not reach the running program.
++const ADOPT_SETTLE: Duration = Duration::from_secs(1);
++
+ /// How long a resize waits for further resizes before only the latest is sent to the shell.
+ const RESIZE_COALESCE: Duration = Duration::from_millis(50);
+ 
+@@ -118,6 +124,27 @@ enum HostControl {
+     Exited(i32),
+     /// The running command turned off echo but kept line editing, like a password prompt.
+     PasswordPrompt,
++    /// Instead of a new shell, the host hands this pane the shell it had before the page
++    /// reloaded. That shell's output follows: its start up to the end of its bootstrap, then
++    /// everything since its latest prompt; then [`HostControl::Adopted`].
++    Adopt {
++        /// As [`HostControl::Session`].
++        session: String,
++        /// The Warp session ids the shell's hooks carry (decimal `u64`s).
++        session_ids: Vec<String>,
++        /// Whether the shell is running a command, rather than waiting at its prompt.
++        #[serde(default)]
++        running: bool,
++    },
++    /// The adopted shell's replayed output is complete.
++    Adopted,
++}
++
++/// Whether the host started a new shell for this pane or handed it one that's already running.
++#[derive(Clone, Copy, PartialEq)]
++enum StartMode {
++    New,
++    Adopted,
+ }
+ 
+ /// The environment that turns on the bootstrap's SSH wrapper, from the Warpify settings.
+@@ -178,6 +205,14 @@ pub(super) struct EventLoop {
+     /// after it closes, so the writer holds messages while this is false.
+     connected: Arc<AtomicBool>,
+     writer_started: bool,
++    /// Tells the writer, once, whether to bootstrap a new shell.
++    start_mode_tx: Sender<StartMode>,
++    start_mode_rx: Receiver<StartMode>,
++    /// While an adopted shell's output is replayed: the terminal's replies to queries in it are
++    /// dropped, since whoever asked has long had its answer.
++    replaying: bool,
++    /// Drops Warp's writes to an adopted shell's running command (see [`ADOPT_SETTLE`]).
++    drop_input: Arc<AtomicBool>,
+ }
+ 
+ impl EventLoop {
+@@ -185,6 +220,7 @@ impl EventLoop {
+     /// bootstrapping the PTY.
+     pub(super) fn start(
+         startup_directory: Option<PathBuf>,
++        pane: Option<String>,
+         model: Arc<FairMutex<TerminalModel>>,
+         websocket_receiver: Receiver<EventLoopMessage>,
+         replies_tx: Sender<EventLoopMessage>,
+@@ -194,7 +230,7 @@ impl EventLoop {
+     ) -> Self {
+         let event_loop = Self::new(model, websocket_receiver, replies_tx, channel_event_listener);
+ 
+-        let url = Self::get_new_session_url(size_info, startup_directory.as_deref());
++        let url = Self::get_new_session_url(size_info, startup_directory.as_deref(), pane.as_deref());
+         let response = WebSocket::connect(url, None /* protocols */);
+ 
+         ctx.spawn(response, Self::on_ws_connection);
+@@ -210,6 +246,7 @@ impl EventLoop {
+     ) -> Self {
+         let (sink_tx, sink_rx) = async_channel::unbounded();
+         let (shell_output_tx, shell_output_rx) = async_channel::bounded(1);
++        let (start_mode_tx, start_mode_rx) = async_channel::bounded(1);
+         Self {
+             terminal_model,
+             parser: Processor::default(),
+@@ -225,10 +262,18 @@ impl EventLoop {
+             sink_rx,
+             connected: Arc::new(AtomicBool::new(false)),
+             writer_started: false,
++            start_mode_tx,
++            start_mode_rx,
++            replaying: false,
++            drop_input: Arc::new(AtomicBool::new(false)),
+         }
+     }
+ 
+-    fn get_new_session_url(size_info: SizeInfo, startup_directory: Option<&Path>) -> String {
++    fn get_new_session_url(
++        size_info: SizeInfo,
++        startup_directory: Option<&Path>,
++        pane: Option<&str>,
++    ) -> String {
+         let num_rows = size_info.rows;
+         let num_cols = size_info.columns;
+ 
+@@ -240,6 +285,11 @@ impl EventLoop {
+             url.push_str("&cwd=");
+             url.extend(url::form_urlencoded::byte_serialize(dir.as_bytes()));
+         }
++        // The pane's shell from before a page reload is handed back if it's still running.
++        if let Some(pane) = pane {
++            url.push_str("&pane=");
++            url.extend(url::form_urlencoded::byte_serialize(pane.as_bytes()));
++        }
+         url
+     }
+ 
+@@ -291,22 +341,34 @@ impl EventLoop {
+         let new_sinks = self.sink_rx.clone();
+         let connected = self.connected.clone();
+         let shell_output = self.shell_output_rx.clone();
++        let start_mode = self.start_mode_rx.clone();
++        let drop_input = self.drop_input.clone();
+         ctx.background_executor()
+             .spawn(async move {
+                 let mut sink = sink;
+                 let shell_type = remote_shell_type();
+-                Self::wait_until_shell_reads_input(&shell_output).await;
+-                if let Err(e) =
+-                    Self::write_env_vars(&mut sink, shell_type, is_honor_ps1_enabled, ssh_wrapper)
+-                        .await
+-                {
+-                    report_error!(e.context("Failed to write env vars to pty"));
+-                }
+-                if let Err(e) =
+-                    Self::write_init_shell_script(&mut sink, shell_type, &terminal_model_for_init)
+-                        .await
+-                {
+-                    report_error!(e.context("Failed to write init shell bytes to pty"));
++                // The host's first message says which; an adopted shell is bootstrapped already.
++                if start_mode.recv().await == Ok(StartMode::New) {
++                    Self::wait_until_shell_reads_input(&shell_output).await;
++                    if let Err(e) = Self::write_env_vars(
++                        &mut sink,
++                        shell_type,
++                        is_honor_ps1_enabled,
++                        ssh_wrapper,
++                    )
++                    .await
++                    {
++                        report_error!(e.context("Failed to write env vars to pty"));
++                    }
++                    if let Err(e) = Self::write_init_shell_script(
++                        &mut sink,
++                        shell_type,
++                        &terminal_model_for_init,
++                    )
++                    .await
++                    {
++                        report_error!(e.context("Failed to write init shell bytes to pty"));
++                    }
+                 }
+ 
+                 while let Ok(first) = receiver.recv().await {
+@@ -336,6 +398,11 @@ impl EventLoop {
+                         let Some(outgoing) = Self::to_outgoing(message) else {
+                             continue;
+                         };
++                        if matches!(outgoing, Outgoing::Binary(_))
++                            && drop_input.load(Ordering::SeqCst)
++                        {
++                            continue;
++                        }
+ 
+                         // Hold the message while disconnected, switch to the newest
+                         // connection, then send; if the send fails, wait for a reconnect.
+@@ -389,7 +456,40 @@ impl EventLoop {
+ 
+     fn on_host_control(&mut self, text: &str, ctx: &mut ModelContext<Self>) {
+         match serde_json::from_str::<HostControl>(text) {
+-            Ok(HostControl::Session(id)) => self.session_id = Some(id),
++            Ok(HostControl::Session(id)) => {
++                if self.session_id.is_none() {
++                    let _ = self.start_mode_tx.try_send(StartMode::New);
++                }
++                self.session_id = Some(id);
++            }
++            Ok(HostControl::Adopt {
++                session,
++                session_ids,
++                running,
++            }) => {
++                log::info!("Taking over the pane's running shell");
++                self.drop_input.store(running, Ordering::SeqCst);
++                self.replaying = true;
++                {
++                    // The shell's hooks carry the session ids it was bootstrapped with.
++                    let mut model = self.terminal_model.lock();
++                    for id in session_ids.iter().filter_map(|id| id.parse::<u64>().ok()) {
++                        model.register_adopted_session_id(SessionId::from(id));
++                    }
++                }
++                if self.session_id.is_none() {
++                    let _ = self.start_mode_tx.try_send(StartMode::Adopted);
++                }
++                self.session_id = Some(session);
++            }
++            Ok(HostControl::Adopted) => {
++                self.replaying = false;
++                if self.drop_input.load(Ordering::SeqCst) {
++                    ctx.spawn(Timer::after(ADOPT_SETTLE), |me, _, _| {
++                        me.drop_input.store(false, Ordering::SeqCst);
++                    });
++                }
++            }
+             Ok(HostControl::Exited(code)) => {
+                 log::info!("Remote shell exited with code {code}");
+                 self.shell_exited = true;
+@@ -561,7 +661,7 @@ impl EventLoop {
+                 .parse_bytes(&mut *terminal_model, bytes, &mut replies);
+         }
+         let _ = self.shell_output_tx.try_send(());
+-        if !replies.is_empty() {
++        if !replies.is_empty() && !self.replaying {
+             let _ = self
+                 .replies_tx
+                 .try_send(EventLoopMessage::Input(Cow::Owned(replies)));
+diff --git a/app/src/terminal/remote_tty/terminal_manager.rs b/app/src/terminal/remote_tty/terminal_manager.rs
+index a44fca6..d54145e 100644
+--- a/app/src/terminal/remote_tty/terminal_manager.rs
++++ b/app/src/terminal/remote_tty/terminal_manager.rs
+@@ -53,6 +53,7 @@ impl TerminalManager {
+     /// Creates a terminal manager model that feeds bytes to/from a remote PTY.
+     pub fn create_model(
+         startup_directory: Option<PathBuf>,
++        pane_uuid: Option<&[u8]>,
+         restored_blocks: Option<&Vec<SerializedBlockListItem>>,
+         resources: TerminalViewResources,
+         initial_size: Vector2F,
+@@ -112,6 +113,7 @@ impl TerminalManager {
+ 
+         let event_loop = Self::create_and_start_event_loop(
+             startup_directory,
++            pane_uuid.map(hex::encode),
+             model.clone(),
+             channel_event_proxy.clone(),
+             event_loop_rx,
+@@ -202,6 +204,7 @@ impl TerminalManager {
+ 
+     fn create_and_start_event_loop(
+         startup_directory: Option<PathBuf>,
++        pane: Option<String>,
+         terminal_model: Arc<FairMutex<TerminalModel>>,
+         channel_event_listener: ChannelEventListener,
+         message_receiver: Receiver<Message>,
+@@ -212,6 +215,7 @@ impl TerminalManager {
+         ctx.add_model(|ctx| {
+             EventLoop::start(
+                 startup_directory,
++                pane,
+                 terminal_model,
+                 message_receiver,
+                 replies_tx,
+diff --git a/app/src/terminal/view/docker_sandbox/mod.rs b/app/src/terminal/view/docker_sandbox/mod.rs
+index 8b04654..99d5971 100644
+--- a/app/src/terminal/view/docker_sandbox/mod.rs
++++ b/app/src/terminal/view/docker_sandbox/mod.rs
+@@ -90,6 +90,7 @@ fn create_docker_sandbox_view(
+         if #[cfg(feature = "remote_tty")] {
+             let terminal_init = RemoteTtyTerminalManager::create_model(
+                 None, /* startup_directory */
++                None, /* pane_uuid */
+                 None, /* restored_blocks */
+                 resources,
+                 initial_size,
+diff --git a/app/src/terminal/writeable_pty/pty_controller.rs b/app/src/terminal/writeable_pty/pty_controller.rs
+index 2623092..a9b5537 100644
+--- a/app/src/terminal/writeable_pty/pty_controller.rs
++++ b/app/src/terminal/writeable_pty/pty_controller.rs
+@@ -329,6 +329,14 @@ impl<T: EventLoopSender> PtyController<T> {
+     ) {
+         let shell_type = pending_session_info.shell.shell_type();
+ 
++        if self
++            .terminal_model
++            .lock()
++            .take_adopted_session_id(pending_session_info.session_id)
++        {
++            return;
++        }
++
+         #[cfg(feature = "local_fs")]
+         if let Some(path) = permanent_bootstrap_file(shell_type, pending_session_info) {
+             // If there is a permanent bootstrap file, source it directly. We

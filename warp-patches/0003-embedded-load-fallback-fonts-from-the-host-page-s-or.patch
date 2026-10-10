@@ -1,0 +1,41 @@
+From b36faa2042e90ab93f7e90acc494a928653fecb3 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 13:33:29 -0700
+Subject: [PATCH 03/49] embedded: load fallback fonts from the host page's
+ origin
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+app.warp.dev rejects cross-origin font requests (CORS), so shortcut symbols like ⌘⇧⌥ rendered as
+boxes. The host serves the OFL/MIT fallback fonts itself.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/font_fallback.rs | 13 +++++++------
+ 1 file changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/app/src/font_fallback.rs b/app/src/font_fallback.rs
+index 6c223dc..390e123 100644
+--- a/app/src/font_fallback.rs
++++ b/app/src/font_fallback.rs
+@@ -6,12 +6,13 @@ use warpui::fonts::ExternalFontFamily;
+ use crate::ChannelState;
+ 
+ fn url_for_font(family_name: &str, font_file: &str) -> String {
+-    format!(
+-        "{}/assets/client/static/fallback-fonts/{}/{}",
+-        ChannelState::server_root_url(),
+-        family_name,
+-        font_file
+-    )
++    let path = format!("/assets/client/static/fallback-fonts/{family_name}/{font_file}");
++    // Embedded (`remote_tty`) pages are served by their host app, which can't fetch from
++    // Warp's server (CORS), so the host serves the fallback fonts itself.
++    #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
++    return warp_util::assets::make_absolute_url(&path);
++    #[allow(unreachable_code)]
++    format!("{}{path}", ChannelState::server_root_url())
+ }
+ 
+ lazy_static! {

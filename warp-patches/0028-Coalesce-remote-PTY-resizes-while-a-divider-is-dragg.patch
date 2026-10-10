@@ -1,0 +1,147 @@
+From 2e642b4c0bfc3c8f346e8a76c6ce297952f440ba Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 01:10:02 -0700
+Subject: [PATCH 28/49] Coalesce remote PTY resizes while a divider is dragged
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/terminal/remote_tty/event_loop.rs | 110 ++++++++++++++--------
+ 1 file changed, 72 insertions(+), 38 deletions(-)
+
+diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
+index 5180629..bea6069 100644
+--- a/app/src/terminal/remote_tty/event_loop.rs
++++ b/app/src/terminal/remote_tty/event_loop.rs
+@@ -61,6 +61,9 @@ struct WindowSizeChange {
+ /// running meanwhile.
+ const MAX_RECONNECT_ATTEMPTS: u32 = 200;
+ 
++/// How long a resize waits for further resizes before only the latest is sent to the shell.
++const RESIZE_COALESCE: Duration = Duration::from_millis(50);
++
+ type BoxedSink = Pin<Box<dyn futures::Sink<Message, Error = websocket::Error> + Send>>;
+ 
+ /// A message for the PTY host, rebuilt for every send attempt so it can be retried on a new
+@@ -215,46 +218,50 @@ impl EventLoop {
+                     report_error!(e.context("Failed to write zsh bootstrap bytes to pty"));
+                 }
+ 
+-                while let Ok(message) = receiver.recv().await {
+-                    let outgoing = match message {
+-                        EventLoopMessage::Input(bytes) => Outgoing::Binary(bytes.to_vec()),
+-                        EventLoopMessage::Resize(size_info) => {
+-                            let size_change = WindowSizeChange {
+-                                width: size_info.columns as u32,
+-                                height: size_info.rows as u32,
+-                                width_px: size_info.pane_width_px().as_f32() as u32,
+-                                height_px: size_info.pane_height_px().as_f32() as u32,
+-                            };
+-
+-                            let Ok(serialized) = serde_json::to_string(&size_change) else {
+-                                report_error!("Error serializing window size change info");
+-                                continue;
+-                            };
+-
+-                            // Sending as a `Text` message implies that this is a
+-                            // control channel message. The SSH proxy server should
+-                            // make this distinction.
+-                            Outgoing::Text(serialized)
+-                        }
+-                        // TODO(alokedesai): Implement shutdown on the network backed PTY.
+-                        EventLoopMessage::Shutdown | EventLoopMessage::ChildExited => continue,
+-                    };
+-
+-                    // Hold the message while disconnected, switch to the newest connection, then
+-                    // send; if the send fails, wait for the event loop to reconnect.
+-                    if !connected.load(Ordering::SeqCst) {
+-                        match new_sinks.recv().await {
+-                            Ok(newer) => sink = newer,
+-                            Err(_) => return,
++                while let Ok(first) = receiver.recv().await {
++                    let mut batch = vec![first];
++                    if matches!(batch[0], EventLoopMessage::Resize(_)) {
++                        // Dragging a divider resizes on every mouse move, and each resize makes
++                        // the shell redraw; let the size settle and send only the latest one.
++                        Timer::after(RESIZE_COALESCE).await;
++                        while let Ok(next) = receiver.try_recv() {
++                            batch.push(next);
+                         }
++                        let last_resize = batch
++                            .iter()
++                            .rposition(|message| matches!(message, EventLoopMessage::Resize(_)));
++                        batch = batch
++                            .into_iter()
++                            .enumerate()
++                            .filter(|(index, message)| {
++                                !matches!(message, EventLoopMessage::Resize(_))
++                                    || Some(*index) == last_resize
++                            })
++                            .map(|(_, message)| message)
++                            .collect();
+                     }
+-                    while let Ok(newer) = new_sinks.try_recv() {
+-                        sink = newer;
+-                    }
+-                    while sink.send(outgoing.to_message()).await.is_err() {
+-                        match new_sinks.recv().await {
+-                            Ok(newer) => sink = newer,
+-                            Err(_) => return,
++
++                    for message in batch {
++                        let Some(outgoing) = Self::to_outgoing(message) else {
++                            continue;
++                        };
++
++                        // Hold the message while disconnected, switch to the newest
++                        // connection, then send; if the send fails, wait for a reconnect.
++                        if !connected.load(Ordering::SeqCst) {
++                            match new_sinks.recv().await {
++                                Ok(newer) => sink = newer,
++                                Err(_) => return,
++                            }
++                        }
++                        while let Ok(newer) = new_sinks.try_recv() {
++                            sink = newer;
++                        }
++                        while sink.send(outgoing.to_message()).await.is_err() {
++                            match new_sinks.recv().await {
++                                Ok(newer) => sink = newer,
++                                Err(_) => return,
++                            }
+                         }
+                     }
+                 }
+@@ -262,6 +269,33 @@ impl EventLoop {
+             .detach();
+     }
+ 
++    /// Converts an event loop message into what goes over the websocket, if anything.
++    fn to_outgoing(message: EventLoopMessage) -> Option<Outgoing> {
++        match message {
++            EventLoopMessage::Input(bytes) => Some(Outgoing::Binary(bytes.to_vec())),
++            EventLoopMessage::Resize(size_info) => {
++                let size_change = WindowSizeChange {
++                    width: size_info.columns as u32,
++                    height: size_info.rows as u32,
++                    width_px: size_info.pane_width_px().as_f32() as u32,
++                    height_px: size_info.pane_height_px().as_f32() as u32,
++                };
++
++                let Ok(serialized) = serde_json::to_string(&size_change) else {
++                    report_error!("Error serializing window size change info");
++                    return None;
++                };
++
++                // Sending as a `Text` message implies that this is a
++                // control channel message. The SSH proxy server should
++                // make this distinction.
++                Some(Outgoing::Text(serialized))
++            }
++            // TODO(alokedesai): Implement shutdown on the network backed PTY.
++            EventLoopMessage::Shutdown | EventLoopMessage::ChildExited => None,
++        }
++    }
++
+     fn on_host_control(&mut self, text: &str) {
+         match serde_json::from_str::<HostControl>(text) {
+             Ok(HostControl::Session(id)) => self.session_id = Some(id),

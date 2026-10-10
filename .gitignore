@@ -1,0 +1,7 @@
+node_modules/
+bundle/
+*.vsix
+.DS_Store
+# Personal planning notes
+ROADMAP.md
+CLAUDE.md

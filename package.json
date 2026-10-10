@@ -1,0 +1,117 @@
+{
+  "name": "panelwarp",
+  "displayName": "Panelwarp",
+  "description": "An unofficial fork of the open-source Warp terminal, running in a VS Code panel tab next to Terminal: blocks, command search, completions and BYOK AI. Not affiliated with Warp.",
+  "version": "0.1.0",
+  "publisher": "felixkrueckel",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/felkru/panelwarp"
+  },
+  "homepage": "https://github.com/felkru/panelwarp#readme",
+  "bugs": {
+    "url": "https://github.com/felkru/panelwarp/issues"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "terminal",
+    "warp",
+    "blocks",
+    "shell",
+    "ai"
+  ],
+  "license": "AGPL-3.0-only",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "warp",
+          "title": "Panelwarp",
+          "icon": "media/warp.svg"
+        }
+      ]
+    },
+    "views": {
+      "warp": [
+        {
+          "type": "webview",
+          "id": "warp.view",
+          "name": "Panelwarp"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "warp.commandPalette",
+        "title": "Command Palette",
+        "category": "Panelwarp"
+      },
+      {
+        "command": "warp.newTab",
+        "title": "New Tab",
+        "category": "Panelwarp"
+      },
+      {
+        "command": "warp.closeTab",
+        "title": "Close Tab",
+        "category": "Panelwarp"
+      },
+      {
+        "command": "warp.nextTab",
+        "title": "Next Tab",
+        "category": "Panelwarp"
+      },
+      {
+        "command": "warp.previousTab",
+        "title": "Previous Tab",
+        "category": "Panelwarp"
+      },
+      {
+        "command": "warp.splitRight",
+        "title": "Split Pane Right",
+        "category": "Panelwarp"
+      },
+      {
+        "command": "warp.splitDown",
+        "title": "Split Pane Down",
+        "category": "Panelwarp"
+      },
+      {
+        "command": "warp.clearBlocks",
+        "title": "Clear Blocks",
+        "category": "Panelwarp"
+      },
+      {
+        "command": "warp.restart",
+        "title": "Restart Panel",
+        "category": "Panelwarp"
+      },
+      {
+        "command": "warp.setOpenRouterApiKey",
+        "title": "Set OpenRouter API Key",
+        "category": "Panelwarp"
+      },
+      {
+        "command": "warp.benchmarkCommandSearch",
+        "title": "Benchmark AI Command Search",
+        "category": "Panelwarp"
+      }
+    ]
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0",
+    "smol-toml": "^1.9.0",
+    "ws": "^8.18.0",
+    "zod": "^4.6.5"
+  }
+}

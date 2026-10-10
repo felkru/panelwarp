@@ -1,0 +1,293 @@
+From 61acc084b84b89546dcc30d5e3c9f1cb610bae33 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 14:10:43 -0700
+Subject: [PATCH 12/49] embedded: persist command history through the host app
+
+The web build has no local database, so command metadata (exit code, times, cwd, git branch,
+shell/host) went nowhere and was lost on reload. Embedded builds now report started/finished
+commands to window.warpPanelRecordCommand and load persisted history from
+window.warpPanelCommandHistory at startup, mirroring desktop's SQLite commands table. The
+finished-command history update no longer requires a persistence sender, which also fixes
+exit codes in in-memory history on the web.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/lib.rs                                |   7 ++
+ app/src/platform/wasm.rs                      | 119 ++++++++++++++++++
+ app/src/terminal/view.rs                      |  52 ++++----
+ .../terminal/writeable_pty/command_history.rs |  37 +++---
+ 4 files changed, 175 insertions(+), 40 deletions(-)
+
+diff --git a/app/src/lib.rs b/app/src/lib.rs
+index daae0d9..1f0c9d5 100644
+--- a/app/src/lib.rs
++++ b/app/src/lib.rs
+@@ -2077,6 +2077,13 @@ pub(crate) fn initialize_app(
+         ProjectManagementModel::new(persisted_projects, persistence_writer.sender(), ctx)
+     });
+ 
++    // The web build has no local database; embedded builds load history the host app persisted.
++    #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
++    let command_history = if command_history.is_empty() {
++        crate::platform::wasm::host_history::load()
++    } else {
++        command_history
++    };
+     ctx.add_singleton_model(move |_| History::new(command_history));
+ 
+     ctx.add_singleton_model(CustomSecretRegexUpdater::new);
+diff --git a/app/src/platform/wasm.rs b/app/src/platform/wasm.rs
+index cf613c7..6587057 100644
+--- a/app/src/platform/wasm.rs
++++ b/app/src/platform/wasm.rs
+@@ -33,6 +33,12 @@ mod ffi {
+         #[wasm_bindgen(js_name = "warpPanelStoreApiKey", catch)]
+         pub fn store_api_key(provider: &str, key: &str) -> Result<(), JsValue>;
+ 
++        #[wasm_bindgen(js_name = "warpPanelCommandHistory", catch)]
++        pub fn command_history() -> Result<Option<String>, JsValue>;
++
++        #[wasm_bindgen(js_name = "warpPanelRecordCommand", catch)]
++        pub fn record_command(kind: &str, json: &str) -> Result<(), JsValue>;
++
+         #[wasm_bindgen(js_name = "warpPanelGenerateCommands", catch)]
+         pub fn generate_commands(
+             prompt: &str,
+@@ -124,3 +130,116 @@ pub fn user_handoff() -> Result<Option<String>, AuthHandoffError> {
+         }
+     })
+ }
++
++/// Command history persisted by the embedding host app (VS Code: a SQLite `commands` table in the
++/// extension's storage, mirroring desktop Warp's), since the web build has no local database.
++/// Rows mirror `persistence::model::Command`; timestamps are RFC 3339, session ids decimal strings.
++#[cfg(feature = "remote_tty")]
++pub mod host_history {
++    use chrono::{DateTime, Local};
++    use serde::{Deserialize, Serialize};
++
++    use crate::persistence::{FinishedCommandMetadata, StartedCommandMetadata};
++    use crate::terminal::history::{PersistedCommand, ShellHost};
++    use crate::terminal::shell::ShellType;
++
++    #[derive(Serialize, Deserialize)]
++    struct Row {
++        #[serde(default)]
++        id: i32,
++        command: String,
++        exit_code: Option<i32>,
++        start_ts: Option<String>,
++        completed_ts: Option<String>,
++        pwd: Option<String>,
++        shell: Option<String>,
++        username: Option<String>,
++        hostname: Option<String>,
++        session_id: Option<String>,
++        git_branch: Option<String>,
++        workflow_command: Option<String>,
++        #[serde(default)]
++        is_agent_executed: bool,
++    }
++
++    #[derive(Serialize)]
++    struct Finished {
++        session_id: String,
++        start_ts: String,
++        completed_ts: String,
++        exit_code: i32,
++    }
++
++    fn parse_ts(ts: Option<String>) -> Option<DateTime<Local>> {
++        ts.and_then(|ts| DateTime::parse_from_rfc3339(&ts).ok())
++            .map(|ts| ts.with_timezone(&Local))
++    }
++
++    /// Persisted commands from the host, newest first (like desktop's sqlite load).
++    pub fn load() -> Vec<PersistedCommand> {
++        let Some(json) = super::ffi::command_history().ok().flatten() else {
++            return Vec::new();
++        };
++        let rows: Vec<Row> = serde_json::from_str(&json).unwrap_or_default();
++        rows.into_iter()
++            .map(|row| PersistedCommand {
++                id: row.id,
++                command: row.command,
++                exit_code: row.exit_code.map(Into::into),
++                start_ts: parse_ts(row.start_ts),
++                completed_ts: parse_ts(row.completed_ts),
++                pwd: row.pwd,
++                shell_host: match (row.shell, row.username, row.hostname) {
++                    (Some(shell), Some(user), Some(hostname)) => ShellType::from_name(&shell)
++                        .map(|shell_type| ShellHost {
++                            shell_type,
++                            user,
++                            hostname,
++                        }),
++                    _ => None,
++                },
++                session_id: row
++                    .session_id
++                    .and_then(|id| id.parse::<u64>().ok())
++                    .map(Into::into),
++                git_branch: row.git_branch,
++                workflow_id: None,
++                workflow_command: row.workflow_command,
++                is_agent_executed: row.is_agent_executed,
++            })
++            .collect()
++    }
++
++    pub fn record_started(metadata: &StartedCommandMetadata) {
++        let row = Row {
++            id: 0,
++            command: metadata.command.clone(),
++            exit_code: None,
++            start_ts: metadata.start_ts.map(|ts| ts.to_rfc3339()),
++            completed_ts: None,
++            pwd: metadata.pwd.clone(),
++            shell: metadata.shell.clone(),
++            username: metadata.username.clone(),
++            hostname: metadata.hostname.clone(),
++            session_id: metadata.session_id.map(|id| id.as_u64().to_string()),
++            git_branch: metadata.git_branch.clone(),
++            workflow_command: metadata.workflow_command.clone(),
++            is_agent_executed: metadata.is_agent_executed,
++        };
++        if let Ok(json) = serde_json::to_string(&row) {
++            let _ = super::ffi::record_command("started", &json);
++        }
++    }
++
++    pub fn record_finished(metadata: &FinishedCommandMetadata) {
++        let finished = Finished {
++            session_id: metadata.session_id.as_u64().to_string(),
++            start_ts: metadata.start_ts.to_rfc3339(),
++            completed_ts: metadata.completed_ts.to_rfc3339(),
++            exit_code: metadata.exit_code.value(),
++        };
++        if let Ok(json) = serde_json::to_string(&finished) {
++            let _ = super::ffi::record_command("finished", &json);
++        }
++    }
++}
+diff --git a/app/src/terminal/view.rs b/app/src/terminal/view.rs
+index 7d21834..107c11c 100644
+--- a/app/src/terminal/view.rs
++++ b/app/src/terminal/view.rs
+@@ -13053,7 +13053,7 @@ impl TerminalView {
+                         exit_code,
+                         Some(start_ts),
+                         Some(completed_ts),
+-                        Some(model_event_sender),
++                        model_event_sender,
+                     ) = (
+                         self.active_block_session_id(),
+                         serialized_block.exit_code,
+@@ -13070,29 +13070,35 @@ impl TerminalView {
+                             );
+                         });
+ 
+-                        let sender_clone = model_event_sender.clone();
+-                        let update_finished_command_event =
+-                            persistence::ModelEvent::UpdateFinishedCommand {
+-                                metadata: FinishedCommandMetadata {
+-                                    exit_code,
+-                                    start_ts,
+-                                    completed_ts,
+-                                    session_id: active_session_id,
++                        let metadata = FinishedCommandMetadata {
++                            exit_code,
++                            start_ts,
++                            completed_ts,
++                            session_id: active_session_id,
++                        };
++                        // Embedded builds have no local database; the host app persists history.
++                        #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
++                        crate::platform::wasm::host_history::record_finished(&metadata);
++
++                        if let Some(model_event_sender) = model_event_sender {
++                            let sender_clone = model_event_sender.clone();
++                            let update_finished_command_event =
++                                persistence::ModelEvent::UpdateFinishedCommand { metadata };
++                            let _ = ctx.spawn(
++                                async move {
++                                    // Sending over a sync sender can block the current thread, so
++                                    // we do this async.
++                                    sender_clone.send(update_finished_command_event)
+                                 },
+-                            };
+-                        let _ = ctx.spawn(
+-                            async move {
+-                                // Sending over a sync sender can block the current thread, so we do this async.
+-                                sender_clone.send(update_finished_command_event)
+-                            },
+-                            move |_, res, _| {
+-                                if let Err(err) = res {
+-                                    log::warn!(
+-                                        "Error sending UpdateFinishedCommand event: {err:#}"
+-                                    );
+-                                }
+-                            },
+-                        );
++                                move |_, res, _| {
++                                    if let Err(err) = res {
++                                        log::warn!(
++                                            "Error sending UpdateFinishedCommand event: {err:#}"
++                                        );
++                                    }
++                                },
++                            );
++                        }
+                     }
+ 
+                     #[cfg(not(target_family = "wasm"))]
+diff --git a/app/src/terminal/writeable_pty/command_history.rs b/app/src/terminal/writeable_pty/command_history.rs
+index 187dd18..de12c7f 100644
+--- a/app/src/terminal/writeable_pty/command_history.rs
++++ b/app/src/terminal/writeable_pty/command_history.rs
+@@ -50,25 +50,28 @@ pub fn update_command_history(
+         );
+     });
+ 
++    let metadata = StartedCommandMetadata {
++        command: event.command.to_owned(),
++        start_ts: active_block.start_ts().copied(),
++        pwd: active_block.pwd().map(|pwd| pwd.to_owned()),
++        shell: Some(session.shell().shell_type().name().to_owned()),
++        username: Some(session.user().to_owned()),
++        hostname: Some(session.hostname().to_owned()),
++        session_id: Some(session_id),
++        cloud_workflow_id: event.workflow_id.to_owned(),
++        workflow_command: event.workflow_command.to_owned(),
++        git_branch: active_block
++            .git_branch()
++            .map(|git_branch| git_branch.to_owned()),
++        is_agent_executed,
++    };
++    // Embedded builds have no local database; the host app persists history instead.
++    #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
++    crate::platform::wasm::host_history::record_started(&metadata);
++
+     if let Some(sender) = model_event_sender {
+         let sender_clone = sender.clone();
+-        let insert_command_event = ModelEvent::InsertCommand {
+-            metadata: StartedCommandMetadata {
+-                command: event.command.to_owned(),
+-                start_ts: active_block.start_ts().copied(),
+-                pwd: active_block.pwd().map(|pwd| pwd.to_owned()),
+-                shell: Some(session.shell().shell_type().name().to_owned()),
+-                username: Some(session.user().to_owned()),
+-                hostname: Some(session.hostname().to_owned()),
+-                session_id: Some(session_id),
+-                cloud_workflow_id: event.workflow_id.to_owned(),
+-                workflow_command: event.workflow_command.to_owned(),
+-                git_branch: active_block
+-                    .git_branch()
+-                    .map(|git_branch| git_branch.to_owned()),
+-                is_agent_executed,
+-            },
+-        };
++        let insert_command_event = ModelEvent::InsertCommand { metadata };
+         ctx.background_executor()
+             .spawn(async move {
+                 // Sending over a sync sender can block the current thread, so we do this async.

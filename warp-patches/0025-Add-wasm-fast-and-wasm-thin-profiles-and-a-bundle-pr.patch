@@ -1,0 +1,74 @@
+From dd7f21509fdcd43b7ebac6410b6ebe3ff9296460 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 21:08:30 -0700
+Subject: [PATCH 25/49] Add wasm-fast and wasm-thin profiles and a bundle
+ --profile flag
+
+wasm-fast (no LTO, incremental) cuts a one-file edit build from ~9 min to ~20 s;
+wasm-thin (thin LTO) is a ~1.5 min near-release build for pre-ship checks.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Cargo.toml         | 17 +++++++++++++++++
+ script/wasm/bundle | 13 +++++++++++++
+ 2 files changed, 30 insertions(+)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index cba3c17..3c08264 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -548,6 +548,23 @@ codegen-units = 1
+ inherits = "release-wasm"
+ debug-assertions = true
+ 
++# Fast edit-build loop for wasm: no LTO, many codegen units, incremental. Same opt level and no
++# debug assertions, like release-wasm, but ~20-30 s per edit instead of ~9 min.
++[profile.wasm-fast]
++inherits = "release-wasm"
++lto = "off"
++codegen-units = 256
++incremental = true
++debug = false
++
++# Close to release-wasm for pre-ship checks: thin LTO is ~1.5 min per edit instead of ~9 min,
++# for a ~7% larger gzipped wasm.
++[profile.wasm-thin]
++inherits = "release-wasm"
++lto = "thin"
++codegen-units = 16
++debug = false
++
+ # A dev profile optimized for remote server deployment. Strips symbols to
+ # reduce binary size and improve rsync delta transfer efficiency.
+ [profile.dev-remote]
+diff --git a/script/wasm/bundle b/script/wasm/bundle
+index a76900f..f6dec46 100755
+--- a/script/wasm/bundle
++++ b/script/wasm/bundle
+@@ -44,6 +44,16 @@ while (( "$#" )); do
+       DEBUG=true
+       shift
+       ;;
++    --profile)
++      # Overrides the cargo profile picked from the channel (e.g. wasm-fast for quick local builds).
++      if [ -n "$2" ] && [ "${2:0:1}" != "-" ]; then
++        PROFILE_OVERRIDE=$2
++        shift 2
++      else
++        echo "Error: Argument for $1 is missing" >&2
++        exit 1
++      fi
++      ;;
+     --check-only)
+       echo 'Only running `cargo check` and not producing a bundle.'
+       CHECK_ONLY="true"
+@@ -116,6 +126,9 @@ elif [[ $RELEASE_CHANNEL = "local" || $RELEASE_CHANNEL = "dev" ]]; then
+ else
+   CARGO_PROFILE="release-wasm"
+ fi
++if [ -n "$PROFILE_OVERRIDE" ]; then
++  CARGO_PROFILE="$PROFILE_OVERRIDE"
++fi
+ 
+ # The `dev` profile needs to be special-cased for historical
+ # reasons: https://doc.rust-lang.org/cargo/guide/build-cache.html#build-cache.

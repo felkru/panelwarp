@@ -1,0 +1,169 @@
+From 8a8339ef5830d3854556ead35d5b2db4e9796cf6 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 16:05:13 -0700
+Subject: [PATCH 47/49] SSH Warpify on the web
+
+The host's shell runs on the user's machine, so the init line now sets the env the
+desktop PTY gets (WARP_IS_LOCAL_SHELL_SESSION, WARP_USE_SSH_WRAPPER from the Warpify
+setting, WARP_SSH_REUSE_CONTROL_MASTER, SSH_SOCKET_DIR) and the bootstrap's ssh wrapper
+Warpifies the remote shell in-band. The SSH extension (remote server) needs local
+ssh/scp processes, so the web dispatcher has remote-server support disabled; without
+that, a wrapped SSH session would hold its bootstrap forever.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/terminal/model_events.rs              |  1 -
+ app/src/terminal/remote_tty/event_loop.rs     | 53 +++++++++++++++++--
+ .../terminal/remote_tty/terminal_manager.rs   | 13 ++++-
+ 3 files changed, 61 insertions(+), 6 deletions(-)
+
+diff --git a/app/src/terminal/model_events.rs b/app/src/terminal/model_events.rs
+index 4c73d53..d4f060c 100644
+--- a/app/src/terminal/model_events.rs
++++ b/app/src/terminal/model_events.rs
+@@ -25,7 +25,6 @@ use crate::terminal::shell::ShellType;
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ pub(crate) enum SshRemoteServerSupport {
+     Enabled,
+-    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+     Disabled,
+ }
+ 
+diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
+index e71ab03..9ea7a34 100644
+--- a/app/src/terminal/remote_tty/event_loop.rs
++++ b/app/src/terminal/remote_tty/event_loop.rs
+@@ -8,6 +8,7 @@ use async_channel::{Receiver, Sender};
+ use futures_util::SinkExt;
+ use parking_lot::FairMutex;
+ use serde::{Deserialize, Serialize};
++use settings::Setting as _;
+ use warp_errors::report_error;
+ use warpui::r#async::Timer;
+ use warpui::{Entity, ModelContext, SingletonEntity};
+@@ -16,7 +17,9 @@ use websocket::{Message, Sink, Stream, WebSocket, WebsocketMessage as _};
+ use crate::terminal::bootstrap::init_shell_script_for_shell;
+ use crate::terminal::event_listener::ChannelEventListener;
+ use crate::terminal::model::ansi::Processor;
++use crate::settings::SshSettings;
+ use crate::terminal::session_settings::SessionSettings;
++use crate::terminal::warpify::settings::WarpifySettings;
+ use crate::terminal::shell::ShellType;
+ use crate::terminal::writeable_pty::Message as EventLoopMessage;
+ use crate::terminal::{SizeInfo, TerminalModel};
+@@ -116,6 +119,38 @@ enum HostControl {
+     PasswordPrompt,
+ }
+ 
++/// The environment that turns on the bootstrap's SSH wrapper, from the Warpify settings.
++#[derive(Clone, Copy)]
++struct SshWrapperEnv {
++    enabled: bool,
++    reuse_control_master: bool,
++}
++
++impl SshWrapperEnv {
++    fn from_settings(ctx: &ModelContext<EventLoop>) -> Self {
++        let enabled = *WarpifySettings::as_ref(ctx)
++            .enable_ssh_warpification
++            .value();
++        Self {
++            enabled,
++            reuse_control_master: enabled
++                && *SshSettings::as_ref(ctx)
++                    .reuse_existing_control_master
++                    .value(),
++        }
++    }
++
++    fn vars(self) -> [(&'static str, &'static str); 4] {
++        let flag = |on: bool| if on { "1" } else { "0" };
++        [
++            ("WARP_IS_LOCAL_SHELL_SESSION", "1"),
++            ("WARP_USE_SSH_WRAPPER", flag(self.enabled)),
++            ("WARP_SSH_REUSE_CONTROL_MASTER", flag(self.reuse_control_master)),
++            ("SSH_SOCKET_DIR", "$HOME/.ssh"),
++        ]
++    }
++}
++
+ pub(super) enum EventLoopEvent {
+     /// The PTY host saw what looks like a password prompt in the running command.
+     PossiblePasswordPrompt,
+@@ -241,6 +276,7 @@ impl EventLoop {
+         self.writer_started = true;
+ 
+         let is_honor_ps1_enabled = *SessionSettings::as_ref(ctx).honor_ps1;
++        let ssh_wrapper = SshWrapperEnv::from_settings(ctx);
+ 
+         let terminal_model_for_init = self.terminal_model.clone();
+         let receiver = self.event_loop_rx.clone();
+@@ -253,7 +289,8 @@ impl EventLoop {
+                 let shell_type = remote_shell_type();
+                 Self::wait_until_shell_reads_input(&shell_output).await;
+                 if let Err(e) =
+-                    Self::write_env_vars(&mut sink, shell_type, is_honor_ps1_enabled).await
++                    Self::write_env_vars(&mut sink, shell_type, is_honor_ps1_enabled, ssh_wrapper)
++                        .await
+                 {
+                     report_error!(e.context("Failed to write env vars to pty"));
+                 }
+@@ -457,15 +494,25 @@ impl EventLoop {
+         sink: &mut impl Sink,
+         shell_type: ShellType,
+         is_honor_ps1_enabled: bool,
++        ssh_wrapper: SshWrapperEnv,
+     ) -> anyhow::Result<()> {
+         // This starts the init line typed into the shell; the leading space keeps it out of the
+         // user's history file (HIST_IGNORE_SPACE / HISTCONTROL=ignorespace), like the bootstrap.
+         let honor_ps1 = is_honor_ps1_enabled as u8;
+-        let honor_ps1_env_var = match shell_type {
++        let mut env_vars = match shell_type {
+             ShellType::Fish => format!(" set -gx WARP_HONOR_PS1 {honor_ps1};"),
+             _ => format!(r#" WARP_HONOR_PS1="{honor_ps1}";"#),
+         };
+-        sink.send(Message::new_binary(honor_ps1_env_var.as_bytes().to_vec()))
++        // The host's shell runs on the user's machine, so it's a local session like a desktop
++        // Warp shell: these make the bootstrap wrap `ssh` and Warpify the remote shell, as the
++        // desktop PTY's environment does (local_tty/unix.rs).
++        for (name, value) in ssh_wrapper.vars() {
++            env_vars.push_str(&match shell_type {
++                ShellType::Fish => format!(" set -gx {name} {value};"),
++                _ => format!(r#" export {name}="{value}";"#),
++            });
++        }
++        sink.send(Message::new_binary(env_vars.as_bytes().to_vec()))
+             .await?;
+ 
+         Ok(())
+diff --git a/app/src/terminal/remote_tty/terminal_manager.rs b/app/src/terminal/remote_tty/terminal_manager.rs
+index a17179f..3b05701 100644
+--- a/app/src/terminal/remote_tty/terminal_manager.rs
++++ b/app/src/terminal/remote_tty/terminal_manager.rs
+@@ -13,7 +13,7 @@ use crate::pane_group::TerminalViewResources;
+ use crate::persistence::ModelEvent;
+ use crate::terminal::event_listener::ChannelEventListener;
+ use crate::terminal::model::session::Sessions;
+-use crate::terminal::model_events::ModelEventDispatcher;
++use crate::terminal::model_events::{ModelEventDispatcher, SshRemoteServerSupport};
+ use crate::terminal::remote_tty::event_loop::{EventLoop, EventLoopEvent};
+ use crate::terminal::writeable_pty::terminal_surface::TerminalSurface as _;
+ use crate::terminal::shell::ShellName;
+@@ -74,7 +74,16 @@ impl TerminalManager {
+             ctx.add_model(|ctx| Sessions::new(executor_command_tx, ctx));
+ 
+         let model_events =
+-            ctx.add_model(|ctx| ModelEventDispatcher::new(events_rx, sessions.clone(), ctx));
++            ctx.add_model(|ctx| {
++                // The SSH extension (remote server) needs local ssh/scp processes, which the web
++                // build can't spawn; SSH sessions are Warpified by the shell wrapper alone.
++                ModelEventDispatcher::new_with_ssh_remote_server_support(
++                    events_rx,
++                    sessions.clone(),
++                    SshRemoteServerSupport::Disabled,
++                    ctx,
++                )
++            });
+ 
+         // Create the terminal model.
+         let model = terminal_manager::create_terminal_model(

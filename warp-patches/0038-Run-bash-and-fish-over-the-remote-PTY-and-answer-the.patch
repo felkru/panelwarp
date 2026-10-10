@@ -1,0 +1,351 @@
+From 367f854c120a791a181da26120f47c8439eea774 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 14:53:51 -0700
+Subject: [PATCH 38/49] Run bash and fish over the remote PTY, and answer the
+ shell's terminal queries
+
+The host app names its shell in the session endpoint (`shell=bash`); remote_tty uses it for the
+session's shell type and init line instead of always assuming zsh:
+- bash gets the init script through `eval`; fish too, then reads Warp's bootstrap through
+  `head -c N | source` instead of its line editor, which redraws the growing `begin ... end`
+  block for every chunk typed (over 15 s).
+- fish sets WARP_HONOR_PS1 with `set -gx`.
+- The init line waits for the shell's first output and 100 ms of quiet (at most 2 s): until the
+  line editor reads input, the terminal keeps only 1024 bytes of a typed line (MAX_CANON).
+
+The parser's replies to terminal queries (device attributes, cursor position, colors) went to
+io::sink(); they now go to the shell like on desktop. fish 4 waited 10 s at startup for one.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/terminal/remote_tty/event_loop.rs     | 133 +++++++++++++++---
+ .../terminal/remote_tty/event_loop_tests.rs   |  29 ++++
+ .../terminal/remote_tty/terminal_manager.rs   |   8 +-
+ 3 files changed, 149 insertions(+), 21 deletions(-)
+ create mode 100644 app/src/terminal/remote_tty/event_loop_tests.rs
+
+diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
+index bea6069..88b9a82 100644
+--- a/app/src/terminal/remote_tty/event_loop.rs
++++ b/app/src/terminal/remote_tty/event_loop.rs
+@@ -1,4 +1,4 @@
+-use std::io;
++use std::borrow::Cow;
+ use std::pin::Pin;
+ use std::sync::Arc;
+ use std::sync::atomic::{AtomicBool, Ordering};
+@@ -43,6 +43,23 @@ fn create_session_endpoint() -> String {
+     CREATE_SESSION_ENDPOINT.to_owned()
+ }
+ 
++/// The shell the PTY host runs, from the `shell` parameter of the session endpoint (e.g.
++/// `...create?token=SECRET&shell=bash`); zsh when it's missing or unknown.
++pub(crate) fn remote_shell_type() -> ShellType {
++    shell_type_from_endpoint(&create_session_endpoint())
++}
++
++fn shell_type_from_endpoint(endpoint: &str) -> ShellType {
++    endpoint
++        .split_once('?')
++        .into_iter()
++        .flat_map(|(_, query)| query.split('&'))
++        .find_map(|param| param.strip_prefix("shell="))
++        .and_then(ShellType::from_name)
++        .filter(|shell| *shell != ShellType::PowerShell)
++        .unwrap_or(ShellType::Zsh)
++}
++
+ /// Contains info needed to resize the SSH terminal session. Is serialized and
+ /// sent over the websocket as text.
+ ///
+@@ -61,6 +78,11 @@ struct WindowSizeChange {
+ /// running meanwhile.
+ const MAX_RECONNECT_ATTEMPTS: u32 = 200;
+ 
++/// How long the shell must be quiet after its first output before Warp types its init line.
++const SHELL_START_QUIET: Duration = Duration::from_millis(100);
++/// How long Warp waits for the shell's first output and for it to be quiet.
++const SHELL_START_TIMEOUT: Duration = Duration::from_secs(2);
++
+ /// How long a resize waits for further resizes before only the latest is sent to the shell.
+ const RESIZE_COALESCE: Duration = Duration::from_millis(50);
+ 
+@@ -96,6 +118,11 @@ pub(super) struct EventLoop {
+     terminal_model: Arc<FairMutex<TerminalModel>>,
+     parser: Processor,
+     event_loop_rx: Receiver<EventLoopMessage>,
++    /// Sends the terminal's replies to the shell's queries through the writer.
++    replies_tx: Sender<EventLoopMessage>,
++    /// Signals shell output to the writer while it waits for the shell to start.
++    shell_output_tx: Sender<()>,
++    shell_output_rx: Receiver<()>,
+     channel_event_listener: ChannelEventListener,
+     /// The host's id for this shell, once it has sent one.
+     session_id: Option<String>,
+@@ -116,11 +143,12 @@ impl EventLoop {
+     pub(super) fn start(
+         model: Arc<FairMutex<TerminalModel>>,
+         websocket_receiver: Receiver<EventLoopMessage>,
++        replies_tx: Sender<EventLoopMessage>,
+         channel_event_listener: ChannelEventListener,
+         size_info: SizeInfo,
+         ctx: &mut ModelContext<Self>,
+     ) -> Self {
+-        let event_loop = Self::new(model, websocket_receiver, channel_event_listener);
++        let event_loop = Self::new(model, websocket_receiver, replies_tx, channel_event_listener);
+ 
+         let url = Self::get_new_session_url(size_info);
+         let response = WebSocket::connect(url, None /* protocols */);
+@@ -133,13 +161,18 @@ impl EventLoop {
+     fn new(
+         terminal_model: Arc<FairMutex<TerminalModel>>,
+         websocket_receiver: Receiver<EventLoopMessage>,
++        replies_tx: Sender<EventLoopMessage>,
+         channel_event_listener: ChannelEventListener,
+     ) -> Self {
+         let (sink_tx, sink_rx) = async_channel::unbounded();
++        let (shell_output_tx, shell_output_rx) = async_channel::bounded(1);
+         Self {
+             terminal_model,
+             parser: Processor::default(),
+             event_loop_rx: websocket_receiver,
++            replies_tx,
++            shell_output_tx,
++            shell_output_rx,
+             channel_event_listener,
+             session_id: None,
+             shell_exited: false,
+@@ -206,16 +239,22 @@ impl EventLoop {
+         let receiver = self.event_loop_rx.clone();
+         let new_sinks = self.sink_rx.clone();
+         let connected = self.connected.clone();
++        let shell_output = self.shell_output_rx.clone();
+         ctx.background_executor()
+             .spawn(async move {
+                 let mut sink = sink;
+-                if let Err(e) = Self::write_env_vars(&mut sink, is_honor_ps1_enabled).await {
++                let shell_type = remote_shell_type();
++                Self::wait_until_shell_reads_input(&shell_output).await;
++                if let Err(e) =
++                    Self::write_env_vars(&mut sink, shell_type, is_honor_ps1_enabled).await
++                {
+                     report_error!(e.context("Failed to write env vars to pty"));
+                 }
+                 if let Err(e) =
+-                    Self::write_zsh_init_shell_script(&mut sink, &terminal_model_for_init).await
++                    Self::write_init_shell_script(&mut sink, shell_type, &terminal_model_for_init)
++                        .await
+                 {
+-                    report_error!(e.context("Failed to write zsh bootstrap bytes to pty"));
++                    report_error!(e.context("Failed to write init shell bytes to pty"));
+                 }
+ 
+                 while let Ok(first) = receiver.recv().await {
+@@ -341,24 +380,61 @@ impl EventLoop {
+         );
+     }
+ 
+-    /// Writes the ZSH init shell script to the "PTY", mimicking how we send the init shell script
++    /// Waits until the shell has started: its first output, then no output for
++    /// [`SHELL_START_QUIET`] (at most [`SHELL_START_TIMEOUT`]). Until the shell's line editor
++    /// reads input, the terminal holds a typed line in its 1024-byte canonical buffer
++    /// (MAX_CANON on macOS) and drops the rest; the init line is longer. fish, which takes a
++    /// moment to start, lost it.
++    async fn wait_until_shell_reads_input(shell_output: &Receiver<()>) {
++        use futures_util::future::{select, Either};
++        let first = shell_output.recv();
++        futures_util::pin_mut!(first);
++        if let Either::Right(_) = select(first, Timer::after(SHELL_START_TIMEOUT)).await {
++            return;
++        }
++        loop {
++            let next = shell_output.recv();
++            futures_util::pin_mut!(next);
++            match select(next, Timer::after(SHELL_START_QUIET)).await {
++                Either::Left((Ok(()), _)) => continue,
++                _ => return,
++            }
++        }
++    }
++
++    /// Writes the init shell script to the "PTY", mimicking how we send the init shell script
+     /// when there is a local pty:
+     /// <https://github.com/warpdotdev/warp-internal/blob/747da2df83f2caa97e781ce284ceb226fb97a66c/app/src/terminal/local_tty/unix.rs#L338-L347>.
+-    async fn write_zsh_init_shell_script(
++    /// Desktop hands bash and fish their script at launch (`--rcfile`, `--init-command`); here the
++    /// shell is already running, so it gets the script through `eval`, which is what the
++    /// single-quote escaping of [`init_shell_script_for_shell`] is for.
++    async fn write_init_shell_script(
+         sink: &mut impl Sink,
++        shell_type: ShellType,
+         terminal_model: &parking_lot::FairMutex<crate::terminal::TerminalModel>,
+     ) -> anyhow::Result<()> {
+         let session_id = crate::terminal::bootstrap::generate_session_id();
+         terminal_model.lock().register_session_id(session_id);
+-        let zsh_init_shell_script =
+-            init_shell_script_for_shell(ShellType::Zsh, &crate::ASSETS, session_id);
+-        sink.send(Message::new_binary(
+-            zsh_init_shell_script.as_bytes().to_vec(),
+-        ))
+-        .await?;
++        let script = init_shell_script_for_shell(shell_type, &crate::ASSETS, session_id);
++        let line = match shell_type {
++            ShellType::Zsh | ShellType::PowerShell => script,
++            ShellType::Bash => format!(" eval '{script}'"),
++            // Warp types the bootstrap right after the init hook. fish's bootstrap is one
++            // `begin ... end` block, and fish's line editor redraws the whole growing block for
++            // every chunk typed (quadratic; over 15 s), so fish reads it from the terminal
++            // without the editor instead: raw mode for exact bytes, then the old mode back.
++            ShellType::Fish => {
++                let len = crate::terminal::bootstrap::script_for_shell(ShellType::Fish, &crate::ASSETS).len();
++                format!(
++                    " eval '{script}'; set -l __warp_tty (command stty -g); command stty raw -echo; \
++                     command head -c {len} | source; command stty $__warp_tty; set -e __warp_tty"
++                )
++            }
++        };
++        sink.send(Message::new_binary(line.into_bytes())).await?;
+ 
+         sink.send(Message::new_binary(
+-            ShellType::Zsh.execute_command_bytes().to_vec(),
++            shell_type.execute_command_bytes().to_vec(),
+         ))
+         .await?;
+ 
+@@ -371,11 +447,16 @@ impl EventLoop {
+     /// order to dogfood Warp on Web over the remote tty.
+     async fn write_env_vars(
+         sink: &mut impl Sink,
++        shell_type: ShellType,
+         is_honor_ps1_enabled: bool,
+     ) -> anyhow::Result<()> {
+         // This starts the init line typed into the shell; the leading space keeps it out of the
+         // user's history file (HIST_IGNORE_SPACE / HISTCONTROL=ignorespace), like the bootstrap.
+-        let honor_ps1_env_var = format!(r#" WARP_HONOR_PS1="{}";"#, is_honor_ps1_enabled as u8);
++        let honor_ps1 = is_honor_ps1_enabled as u8;
++        let honor_ps1_env_var = match shell_type {
++            ShellType::Fish => format!(" set -gx WARP_HONOR_PS1 {honor_ps1};"),
++            _ => format!(r#" WARP_HONOR_PS1="{honor_ps1}";"#),
++        };
+         sink.send(Message::new_binary(honor_ps1_env_var.as_bytes().to_vec()))
+             .await?;
+ 
+@@ -406,10 +487,22 @@ impl EventLoop {
+     }
+ 
+     /// Processes a byte slice through the `Processor`.
++    /// Replies to the shell's terminal queries (device attributes, cursor position, colors) go
++    /// back to the shell, like the local PTY's event loop does; fish, for one, waits 10 s at
++    /// startup for an answer.
+     fn process_pty_bytes(&mut self, bytes: &[u8]) {
+-        let mut terminal_model = self.terminal_model.lock();
+-        self.parser
+-            .parse_bytes(&mut *terminal_model, bytes, &mut io::sink());
++        let mut replies = Vec::new();
++        {
++            let mut terminal_model = self.terminal_model.lock();
++            self.parser
++                .parse_bytes(&mut *terminal_model, bytes, &mut replies);
++        }
++        let _ = self.shell_output_tx.try_send(());
++        if !replies.is_empty() {
++            let _ = self
++                .replies_tx
++                .try_send(EventLoopMessage::Input(Cow::Owned(replies)));
++        }
+         self.channel_event_listener.send_wakeup_event();
+     }
+ }
+@@ -417,3 +510,7 @@ impl EventLoop {
+ impl Entity for EventLoop {
+     type Event = ();
+ }
++
++#[cfg(test)]
++#[path = "event_loop_tests.rs"]
++mod tests;
+diff --git a/app/src/terminal/remote_tty/event_loop_tests.rs b/app/src/terminal/remote_tty/event_loop_tests.rs
+new file mode 100644
+index 0000000..decd336
+--- /dev/null
++++ b/app/src/terminal/remote_tty/event_loop_tests.rs
+@@ -0,0 +1,29 @@
++use super::*;
++
++#[test]
++fn shell_type_from_endpoint_reads_the_shell_parameter() {
++    let endpoint = "ws://127.0.0.1:1/create?token=abc&shell=bash";
++    assert_eq!(shell_type_from_endpoint(endpoint), ShellType::Bash);
++    assert_eq!(
++        shell_type_from_endpoint("ws://127.0.0.1:1/create?shell=fish&token=abc"),
++        ShellType::Fish
++    );
++    assert_eq!(
++        shell_type_from_endpoint("ws://127.0.0.1:1/create?shell=zsh"),
++        ShellType::Zsh
++    );
++}
++
++#[test]
++fn shell_type_from_endpoint_defaults_to_zsh() {
++    assert_eq!(shell_type_from_endpoint(CREATE_SESSION_ENDPOINT), ShellType::Zsh);
++    assert_eq!(
++        shell_type_from_endpoint("ws://127.0.0.1:1/create?token=abc&shell=nu"),
++        ShellType::Zsh
++    );
++    // The host app can't run PowerShell through the remote PTY.
++    assert_eq!(
++        shell_type_from_endpoint("ws://127.0.0.1:1/create?shell=pwsh"),
++        ShellType::Zsh
++    );
++}
+diff --git a/app/src/terminal/remote_tty/terminal_manager.rs b/app/src/terminal/remote_tty/terminal_manager.rs
+index 87fbb67..09392cf 100644
+--- a/app/src/terminal/remote_tty/terminal_manager.rs
++++ b/app/src/terminal/remote_tty/terminal_manager.rs
+@@ -15,7 +15,7 @@ use crate::terminal::event_listener::ChannelEventListener;
+ use crate::terminal::model::session::Sessions;
+ use crate::terminal::model_events::ModelEventDispatcher;
+ use crate::terminal::remote_tty::event_loop::EventLoop;
+-use crate::terminal::shell::{ShellName, ShellType};
++use crate::terminal::shell::ShellName;
+ use crate::terminal::terminal_manager::BlockSpacing;
+ use crate::terminal::writeable_pty::pty_controller::{EventLoopSendError, EventLoopSender};
+ use crate::terminal::writeable_pty::terminal_manager_util::{
+@@ -81,11 +81,10 @@ impl TerminalManager {
+             None, /* restored_blocks */
+             initial_size,
+             channel_event_proxy.clone(),
+-            // TODO(alokedesai): Add support for other shells within the network-backed pty.
+             ShellLaunchState::ShellSpawned {
+                 available_shell: None,
+                 display_name: ShellName::blank(),
+-                shell_type: ShellType::Zsh,
++                shell_type: super::event_loop::remote_shell_type(),
+             },
+             BlockSpacing::for_gui(ctx),
+             ctx,
+@@ -101,6 +100,7 @@ impl TerminalManager {
+             model.clone(),
+             channel_event_proxy.clone(),
+             event_loop_rx,
++            event_loop_tx.clone(),
+             size_info,
+             ctx,
+         );
+@@ -172,6 +172,7 @@ impl TerminalManager {
+         terminal_model: Arc<FairMutex<TerminalModel>>,
+         channel_event_listener: ChannelEventListener,
+         message_receiver: Receiver<Message>,
++        replies_tx: Sender<Message>,
+         size_info: SizeInfo,
+         ctx: &mut AppContext,
+     ) -> ModelHandle<EventLoop> {
+@@ -179,6 +180,7 @@ impl TerminalManager {
+             EventLoop::start(
+                 terminal_model,
+                 message_receiver,
++                replies_tx,
+                 channel_event_listener,
+                 size_info,
+                 ctx,

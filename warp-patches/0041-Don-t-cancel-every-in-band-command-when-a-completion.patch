@@ -1,0 +1,171 @@
+From fe471ebe157627d0b6b411c279166e2851a99d71 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 15:13:44 -0700
+Subject: [PATCH 41/49] Don't cancel every in-band command when a completion is
+ aborted
+
+Aborting a stale completion, autosuggestion or decoration future already
+cancels its own commands (on_cancel / kill on drop). The extra session-wide
+cancel_active_commands() also dropped unrelated queued commands, which on an
+in-band session (the web build, SSH) are all of them. Also re-parse the input
+once external commands have loaded instead of reusing the cached parse.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/terminal/input.rs             | 24 ++++--------------------
+ app/src/terminal/input/decorations.rs | 17 ++++++++++++-----
+ app/src/terminal/view.rs              |  8 +-------
+ 3 files changed, 17 insertions(+), 32 deletions(-)
+
+diff --git a/app/src/terminal/input.rs b/app/src/terminal/input.rs
+index 8db11ec..78a8b2d 100644
+--- a/app/src/terminal/input.rs
++++ b/app/src/terminal/input.rs
+@@ -10249,9 +10249,6 @@ impl Input {
+         }
+ 
+         let completion_context = completer_data.completion_session_context(ctx);
+-        let completion_session = completion_context
+-            .as_ref()
+-            .map(|completion_context| completion_context.session.clone());
+ 
+         let reverse_chronological_potential_autosuggestions =
+             NextCommandModel::get_reverse_chronological_potential_autosuggestions(
+@@ -10415,11 +10412,7 @@ impl Input {
+                     }
+                 },
+                 Self::on_autosuggestion_result,
+-                move |_, _| {
+-                    if let Some(session) = completion_session {
+-                        session.cancel_active_commands();
+-                    }
+-                },
++                |_, _| {},
+             )
+             .abort_handle();
+ 
+@@ -12830,7 +12823,6 @@ impl Input {
+         }
+ 
+         if comp_sources == CompletionSources::WarpThenNative {
+-            let completion_session = completion_context.session.clone();
+             let abort_handle = ctx
+                 .spawn_abortable(
+                     async move {
+@@ -12890,9 +12882,7 @@ impl Input {
+                             );
+                         }
+                     },
+-                    move |_, _| {
+-                        completion_session.cancel_active_commands();
+-                    },
++                    |_, _| {},
+                 )
+                 .abort_handle();
+             self.completions_abort_handle = Some(abort_handle);
+@@ -12915,7 +12905,6 @@ impl Input {
+             futures::future::ready(None).boxed()
+         };
+ 
+-        let completion_session = completion_context.session.clone();
+ 
+         let abort_handle = ctx
+             .spawn_abortable(
+@@ -12990,9 +12979,7 @@ impl Input {
+                         ctx,
+                     )
+                 },
+-                move |_, _| {
+-                    completion_session.cancel_active_commands();
+-                },
++                |_, _| {},
+             )
+             .abort_handle();
+ 
+@@ -13027,7 +13014,6 @@ impl Input {
+             buffer_text: buffer_text[0..cursor_position].to_owned(),
+             results_tx,
+         });
+-        let completion_session = completion_context.session.clone();
+ 
+         let abort_handle = ctx
+             .spawn_abortable(
+@@ -13068,9 +13054,7 @@ impl Input {
+                         ctx,
+                     );
+                 },
+-                move |_, _| {
+-                    completion_session.cancel_active_commands();
+-                },
++                |_, _| {},
+             )
+             .abort_handle();
+         self.completions_abort_handle = Some(abort_handle);
+diff --git a/app/src/terminal/input/decorations.rs b/app/src/terminal/input/decorations.rs
+index fda5440..d5d2671 100644
+--- a/app/src/terminal/input/decorations.rs
++++ b/app/src/terminal/input/decorations.rs
+@@ -205,8 +205,6 @@ impl Input {
+                     handle.abort_handle().abort();
+                 }
+ 
+-                let completion_session = completion_context.session.clone();
+-
+                 self.decorations_future_handle = Some(ctx.spawn_abortable(
+                     async move {
+                         (
+@@ -226,9 +224,7 @@ impl Input {
+                             input.apply_decorations(ctx);
+                         }
+                     },
+-                    move |_, _| {
+-                        completion_session.cancel_active_commands();
+-                    },
++                    |_, _| {},
+                 ));
+             }
+             CompletionSessionContext::Empty(detection_ctx) => {
+@@ -257,6 +253,17 @@ impl Input {
+         }
+     }
+ 
++    /// Re-parses and re-decorates the input even if its text hasn't changed, for when the
++    /// session's known commands changed (e.g. external commands finished loading) and the
++    /// cached parse may have marked valid commands as errors.
++    pub fn redecorate_input(&mut self, ctx: &mut ViewContext<Self>) {
++        self.last_parsed_tokens = None;
++        self.run_input_background_jobs(
++            InputBackgroundJobOptions::default().with_command_decoration(),
++            ctx,
++        );
++    }
++
+     /// Applies error underlining and/or syntax highlighting as appropriate,
+     /// using the result of the last parse operation.
+     fn apply_decorations(&mut self, ctx: &mut ViewContext<Self>) {
+diff --git a/app/src/terminal/view.rs b/app/src/terminal/view.rs
+index fcf879d..78182bf 100644
+--- a/app/src/terminal/view.rs
++++ b/app/src/terminal/view.rs
+@@ -417,7 +417,6 @@ use crate::terminal::event::{
+ use crate::terminal::find::{BlockGridMatch, BlockListMatch, TerminalFindModel};
+ use crate::terminal::general_settings::GeneralSettings;
+ use crate::terminal::grid_size_util::grid_cell_dimensions;
+-use crate::terminal::input::decorations::InputBackgroundJobOptions;
+ use crate::terminal::input::inline_menu::InlineMenuPositioner;
+ #[cfg(not(target_family = "wasm"))]
+ use crate::terminal::input::slash_commands::fork_button_action;
+@@ -14267,12 +14266,7 @@ impl TerminalView {
+         ctx.spawn(
+             async move { session.load_external_commands().await },
+             move |me, _, ctx| {
+-                input.update(ctx, |input, ctx| {
+-                    input.run_input_background_jobs(
+-                        InputBackgroundJobOptions::default().with_command_decoration(),
+-                        ctx,
+-                    );
+-                });
++                input.update(ctx, |input, ctx| input.redecorate_input(ctx));
+                 me.refresh_warp_prompt(ctx);
+             },
+         );

@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Warp</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; outline: none; }
+
+    #loading {
+      position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 18px; background: #0b0b0c;
+      color: #c8c8cc; font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      transition: opacity 0.35s ease;
+    }
+    #loading.done { opacity: 0; pointer-events: none; }
+    #loading .mark { width: 44px; height: 44px; color: #4aa3df; animation: pulse 1.6s ease-in-out infinite; }
+    #loading .title { font-size: 15px; font-weight: 600; color: #ececf0; letter-spacing: 0.2px; }
+    #loading .bar { width: min(320px, 70vw); height: 4px; border-radius: 2px; background: #1f1f23; overflow: hidden; }
+    #loading .fill {
+      height: 100%; width: 0%; border-radius: 2px; transition: width 0.15s linear;
+      background: linear-gradient(90deg, #2f80c4, #4aa3df, #7cc4f2);
+    }
+    #loading .bar.indeterminate .fill {
+      width: 35%; animation: slide 1.2s ease-in-out infinite;
+    }
+    #loading .status { font-variant-numeric: tabular-nums; color: #8c8c94; min-height: 1.4em; }
+    @keyframes pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+    @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+    @media (prefers-reduced-motion: reduce) {
+      #loading .mark, #loading .bar.indeterminate .fill { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="loading" role="status" aria-live="polite">
+    <svg class="mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="2.5" y="4" width="19" height="16" rx="3"></rect>
+      <path d="M7 9.5l3 2.5-3 2.5"></path><path d="M12.5 15h4.5"></path>
+    </svg>
+    <div class="title">Starting Warp</div>
+    <div class="bar"><div class="fill"></div></div>
+    <div class="status">Loading...</div>
+  </div>
+  <script type="module">
+    import init from '/assets/client/wasm/warp.js';
+
+    const loading = {
+      root: document.getElementById('loading'),
+      bar: document.querySelector('#loading .bar'),
+      fill: document.querySelector('#loading .fill'),
+      status: document.querySelector('#loading .status'),
+      set(text, fraction) {
+        this.status.textContent = text;
+        this.bar.classList.toggle('indeterminate', fraction == null);
+        if (fraction != null) this.fill.style.width = `${Math.round(fraction * 100)}%`;
+      },
+      // Hide once Warp has attached its canvas and painted a frame.
+      finishWhenRendered() {
+        const check = () => {
+          if (document.querySelector('canvas')) {
+            requestAnimationFrame(() => setTimeout(() => this.root.classList.add('done'), 250));
+            if (embedded) window.parent.postMessage({ type: 'warp-loaded', timing: loadTiming() }, '*');
+          } else {
+            setTimeout(check, 100);
+          }
+        };
+        check();
+      },
+    };
+
+    // Start loading the ~100 MB wasm right away, while the extension sends the saved settings.
+    // VS Code's webview doesn't keep a file this big in its HTTP cache, so the page keeps it in
+    // Cache Storage, keyed by the server's ETag: later loads read it from disk instead of
+    // downloading it again. Compiling from a Response streams it and lets the browser reuse its
+    // compiled code; a clone of a fresh download drives the progress bar.
+    const WASM_URL = '/assets/client/wasm/warp_bg.wasm';
+    const WASM_CACHE = 'warp-wasm';
+    // Milliseconds since navigation at each load phase, logged by the extension.
+    const phases = {};
+    const phase = (name) => (phases[name] ??= Math.round(performance.now()));
+    let wasmSource = 'network';
+    function loadTiming() {
+      phase('rendered');
+      return { ...phases, wasm: wasmSource };
+    }
+    async function cachedWasm() {
+      try {
+        // The extension passes the wasm's ETag in the page URL; ask the server otherwise.
+        const known = new URLSearchParams(location.search).get('wasm');
+        const [etag, cache] = await Promise.all([
+          known || fetch(WASM_URL, { method: 'HEAD', cache: 'no-store' }).then((r) => r.headers.get('ETag')),
+          caches.open(WASM_CACHE),
+        ]);
+        const cached = await cache.match(WASM_URL);
+        if (etag && cached?.headers.get('ETag') === etag) return { cached };
+        return { cache, etag };
+      } catch {
+        return {}; // No Cache Storage here; download as usual.
+      }
+    }
+    const wasmModule = (async () => {
+      const mb = (bytes) => (bytes / 1e6).toFixed(0);
+      const { cached, cache, etag } = await cachedWasm();
+      phase('cacheChecked');
+      let response = cached;
+      if (cached) {
+        wasmSource = 'cache';
+      } else {
+        response = await fetch(WASM_URL, { cache: 'no-store' });
+        if (cache && etag && response.ok && response.headers.get('ETag') === etag) {
+          // Replace older versions; written in the background while Warp starts.
+          const copy = response.clone();
+          cache.keys().then((keys) => Promise.all(keys.map((key) => cache.delete(key))))
+            .then(() => cache.put(WASM_URL, copy))
+            .catch(() => {});
+        }
+        // A precompressed wasm arrives brotli-encoded; progress counts the decoded bytes.
+        const total =
+          Number(response.headers.get('X-Decoded-Length') || response.headers.get('Content-Length')) || 0;
+        if (response.body && total) {
+          (async () => {
+            const reader = response.clone().body.getReader();
+            let received = 0;
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              received += value.length;
+              loading.set(`Downloading Warp · ${mb(received)} / ${mb(total)} MB`, received / total);
+            }
+            phase('downloaded');
+            loading.set('Compiling Warp...', null);
+          })().catch(() => {});
+        }
+      }
+      try {
+        return await WebAssembly.compileStreaming(response);
+      } catch {
+        // E.g. a missing application/wasm content type; compile from the bytes instead.
+        return WebAssembly.compile(await (await fetch(WASM_URL)).arrayBuffer());
+      }
+    })();
+    wasmModule.catch(() => {}); // Reported by loadWarp.
+
+    async function loadWarp() {
+      const module = await wasmModule;
+      phase('compiled');
+      try {
+        await init({ module_or_path: module });
+      } catch (error) {
+        // winit's web event loop starts by throwing this on purpose; Warp is running.
+        if (!String(error?.message ?? error).includes('Using exceptions for control flow')) throw error;
+      }
+      phase('initialized');
+      loading.set('Starting your shell...', 1);
+      loading.finishWhenRendered();
+    }
+
+    // Keys listed in ?keys= (VS Code-style specs, e.g. "cmd+shift+p") are routed to the
+    // embedding VS Code webview instead of Warp, like terminal.integrated.commandsToSkipShell.
+    const params = new URLSearchParams(location.search);
+    const routedKeys = JSON.parse(params.get('keys') || '[]').map(parseSpec);
+    const embedded = window.parent !== window;
+
+    function parseSpec(spec) {
+      const parts = spec.toLowerCase().split('+');
+      const key = parts.pop();
+      return {
+        spec,
+        key,
+        cmd: parts.includes('cmd'),
+        ctrl: parts.includes('ctrl'),
+        alt: parts.includes('alt'),
+        shift: parts.includes('shift'),
+      };
+    }
+
+    // e.key is affected by shift/alt on some layouts, so letters and digits compare on e.code.
+    function eventKey(e) {
+      if (/^Key[A-Z]$/.test(e.code)) return e.code.slice(3).toLowerCase();
+      if (/^Digit[0-9]$/.test(e.code)) return e.code.slice(5);
+      if (e.code === 'Backquote') return '`';
+      return e.key.toLowerCase();
+    }
+
+    function matchRouted(e) {
+      const key = eventKey(e);
+      return routedKeys.find(
+        (k) =>
+          k.key === key &&
+          k.cmd === e.metaKey &&
+          k.ctrl === e.ctrlKey &&
+          k.alt === e.altKey &&
+          k.shift === e.shiftKey,
+      );
+    }
+
+    if (embedded) {
+      // The webview's iframe may neither open windows nor write the clipboard, so hand both to
+      // the extension (vscode.env.openExternal / vscode.env.clipboard). Warp captures
+      // navigator.clipboard once at startup, so patch that object before init().
+      const toExtension = (msg) => window.parent.postMessage(msg, '*');
+      window.open = (url) => {
+        toExtension({ type: 'warp-open-url', url: String(url) });
+        return null;
+      };
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText = async (text) =>
+          toExtension({ type: 'warp-clipboard-write', text: String(text) });
+        navigator.clipboard.write = async (items) => {
+          for (const item of items) {
+            if (item.types.includes('text/plain')) {
+              const text = await (await item.getType('text/plain')).text();
+              toExtension({ type: 'warp-clipboard-write', text });
+              return;
+            }
+          }
+        };
+      }
+
+      // Clicking into this nested iframe doesn't make VS Code treat the Warp view as focused, so
+      // keys keep going to the previously focused view (e.g. Claude Code). Ask the extension to
+      // focus the view the way switching panel tabs does.
+      window.addEventListener(
+        'pointerdown',
+        () => {
+          if (!document.hasFocus()) toExtension({ type: 'warp-request-focus' });
+        },
+        true,
+      );
+
+      // Called by our Warp build for "Open settings file" (app/src/platform/wasm.rs); the
+      // extension opens a settings.toml in a VS Code editor.
+      window.warpPanelOpenSettingsFile = () => toExtension({ type: 'warp-open-settings' });
+      // Clickable file paths in terminal output (app/src/terminal/view/link_detection.rs): the
+      // extension checks which possible paths exist (filePaths.js) and opens or reveals them.
+      const pendingPaths = new Map();
+      let nextPathsId = 0;
+      window.warpPanelResolvePaths = (cwd, candidatesJson) =>
+        new Promise((resolve, reject) => {
+          const id = ++nextPathsId;
+          const timer = setTimeout(() => {
+            pendingPaths.delete(id);
+            reject('timed out');
+          }, 5000);
+          pendingPaths.set(id, { resolve, timer });
+          toExtension({ type: 'warp-resolve-paths', id, cwd: String(cwd), candidates: String(candidatesJson) });
+        });
+      window.addEventListener('message', (e) => {
+        if (e.source !== window.parent || e.data?.type !== 'warp-resolve-paths-result') return;
+        const pending = pendingPaths.get(e.data.id);
+        if (!pending) return;
+        pendingPaths.delete(e.data.id);
+        clearTimeout(pending.timer);
+        pending.resolve(e.data.json);
+      });
+      window.warpPanelOpenFile = (path, line, column) =>
+        toExtension({ type: 'warp-open-file', path: String(path), line: line ?? null, column: column ?? null });
+      window.warpPanelRevealFile = (path) => toExtension({ type: 'warp-reveal-file', path: String(path) });
+      // Notifications (long-running commands, commands waiting for a password): the extension
+      // shows them as VS Code notifications, since a webview can't get the browser's permission.
+      // Warp's web build only constructs Notification and reads its permission
+      // (crates/warpui/src/windowing/winit/notifications/wasm.rs).
+      window.Notification = class extends EventTarget {
+        static get permission() {
+          return 'granted';
+        }
+        static requestPermission() {
+          return Promise.resolve('granted');
+        }
+        constructor(title, options = {}) {
+          super();
+          toExtension({ type: 'warp-notify', title: String(title), body: String(options.body ?? '') });
+        }
+        close() {}
+      };
+      // The terminal bell (app/src/terminal/audible_bell/web.rs): a short, quiet beep.
+      let bellAudio;
+      window.warpPanelBell = () => {
+        bellAudio ??= new AudioContext();
+        const oscillator = bellAudio.createOscillator();
+        const gain = bellAudio.createGain();
+        const now = bellAudio.currentTime;
+        oscillator.frequency.value = 880;
+        gain.gain.setValueAtTime(0.08, now);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.15);
+        oscillator.connect(gain).connect(bellAudio.destination);
+        oscillator.start(now);
+        oscillator.stop(now + 0.15);
+      };
+      // Called by the "AI provider" settings row; the key goes straight to the extension
+      // (VS Code SecretStorage) and isn't kept by Warp.
+      window.warpPanelStoreApiKey = (provider, key) =>
+        toExtension({ type: 'warp-store-api-key', provider: String(provider), key: String(key) });
+
+      // AI Command Search (`#`) for our Warp build (app/src/platform/wasm.rs): resolves to a JSON
+      // array of commands, or rejects with an error code string.
+      const pendingAi = new Map();
+      let nextAiId = 0;
+      window.warpPanelGenerateCommands = (prompt, context, stage) =>
+        new Promise((resolve, reject) => {
+          const id = ++nextAiId;
+          const timer = setTimeout(() => {
+            pendingAi.delete(id);
+            reject('other');
+          }, 60000);
+          pendingAi.set(id, { resolve, reject, timer });
+          toExtension({
+            type: 'warp-ai-generate-commands',
+            id,
+            prompt,
+            context: context ?? null,
+            stage: stage ?? 'fast',
+          });
+        });
+      // Next Command (app/src/platform/wasm.rs): resolves to the predicted command or null.
+      window.warpPanelNextCommand = (request) =>
+        new Promise((resolve, reject) => {
+          const id = ++nextAiId;
+          const timer = setTimeout(() => {
+            pendingAi.delete(id);
+            reject('other');
+          }, 20000);
+          pendingAi.set(id, { resolve, reject, timer });
+          toExtension({ type: 'warp-ai-next-command', id, request: String(request) });
+        });
+      // Prompt Suggestions (app/src/platform/wasm.rs): resolves to a CLI agent prompt or null.
+      window.warpPanelPromptSuggestion = (request) =>
+        new Promise((resolve, reject) => {
+          const id = ++nextAiId;
+          const timer = setTimeout(() => {
+            pendingAi.delete(id);
+            reject('other');
+          }, 20000);
+          pendingAi.set(id, { resolve, reject, timer });
+          toExtension({ type: 'warp-ai-prompt-suggestion', id, request: String(request) });
+        });
+      window.addEventListener('message', (e) => {
+        if (e.source !== window.parent || e.data?.type !== 'warp-ai-result') return;
+        const pending = pendingAi.get(e.data.id);
+        if (!pending) return;
+        pendingAi.delete(e.data.id);
+        clearTimeout(pending.timer);
+        if (e.data.error) pending.reject(e.data.error);
+        else pending.resolve(e.data.json);
+      });
+
+      // Warp's Agents panel (app/src/platform/wasm.rs): coding-agent conversations from anywhere on
+      // this Mac. Requests go to the extension (agents.js) and its replies come back by id.
+      const pendingAgents = new Map();
+      let nextAgentsId = 0;
+      const agentsRequest = (message, timeout, onText) =>
+        new Promise((resolve, reject) => {
+          const id = ++nextAgentsId;
+          const timer = setTimeout(() => {
+            pendingAgents.delete(id);
+            reject('timed out');
+          }, timeout);
+          pendingAgents.set(id, { resolve, reject, timer, onText });
+          toExtension({ ...message, id });
+        });
+      // Resolves to a JSON array of {agent, id, title, cwd, updatedAt}.
+      window.warpPanelAgentConversations = () => agentsRequest({ type: 'warp-agents-list' }, 30000);
+      // Calls onText with the summary so far; rejects with an error message.
+      window.warpPanelAgentConversationSummary = (agent, id, onText) =>
+        agentsRequest({ type: 'warp-agents-summary', agent: String(agent), sessionId: String(id) }, 60000, onText);
+      // Resolves to undefined if VS Code opened it, or a command for Warp to run in a new tab.
+      window.warpPanelOpenAgentConversation = (agent, id) =>
+        agentsRequest({ type: 'warp-agents-open', agent: String(agent), sessionId: String(id) }, 30000);
+      window.addEventListener('message', (e) => {
+        if (e.source !== window.parent) return;
+        const pending = pendingAgents.get(e.data?.id);
+        if (!pending) return;
+        if (e.data.type === 'warp-agents-text') {
+          if (typeof e.data.text === 'string') pending.onText?.(e.data.text);
+          return;
+        }
+        if (e.data.type !== 'warp-agents-result') return;
+        pendingAgents.delete(e.data.id);
+        clearTimeout(pending.timer);
+        if (e.data.error) pending.reject(String(e.data.error));
+        else pending.resolve(e.data.value ?? undefined);
+      });
+
+      // Modal confirmation in VS Code (app/src/platform/wasm.rs `confirm_in_host`): resolves to a
+      // boolean.
+      const pendingConfirms = new Map();
+      let nextConfirmId = 0;
+      window.warpPanelConfirm = (message, detail, confirmLabel) =>
+        new Promise((resolve) => {
+          const id = ++nextConfirmId;
+          pendingConfirms.set(id, resolve);
+          toExtension({ type: 'warp-confirm', id, message, detail, confirmLabel });
+        });
+      window.addEventListener('message', (e) => {
+        if (e.source !== window.parent || e.data?.type !== 'warp-confirm-result') return;
+        pendingConfirms.get(e.data.id)?.(e.data.confirmed === true);
+        pendingConfirms.delete(e.data.id);
+      });
+
+      let swallowKeyup = null;
+      window.addEventListener(
+        'keydown',
+        (e) => {
+          // Synthetic keystrokes from "Warp: ..." commands are for Warp itself, never re-routed
+          // (Cmd+P from "Warp: Command Palette" would open VS Code's Quick Open instead).
+          if (!e.isTrusted) return;
+          // Native paste doesn't reach this nested iframe, so Cmd+V asks the extension for the
+          // clipboard and we replay it as a paste event (Warp listens for paste on document).
+          if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.code === 'KeyV') {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            swallowKeyup = e.code;
+            toExtension({ type: 'warp-clipboard-read' });
+            return;
+          }
+          const match = matchRouted(e);
+          if (!match) return;
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          swallowKeyup = e.code;
+          window.parent.postMessage({ type: 'warp-routed-key', spec: match.spec }, '*');
+        },
+        true,
+      );
+      window.addEventListener(
+        'keyup',
+        (e) => {
+          if (e.code !== swallowKeyup) return;
+          swallowKeyup = null;
+          e.preventDefault();
+          e.stopImmediatePropagation();
+        },
+        true,
+      );
+
+      // Commands from VS Code ("Warp: New Tab", ...) arrive as synthetic keystrokes. Only the
+      // embedding webview may send them.
+      window.addEventListener('message', (e) => {
+        if (e.source !== window.parent) return;
+        const msg = e.data || {};
+        const canvas = document.querySelector('canvas');
+        if (msg.type === 'warp-navigate') {
+          // e.g. warposs://settings?widget=host_api_key; window.warpOpenUrl is installed by Warp.
+          window.warpOpenUrl?.(String(msg.url));
+        } else if (msg.type === 'warp-paste') {
+          const clipboardData = new DataTransfer();
+          clipboardData.setData('text/plain', String(msg.text));
+          document.dispatchEvent(
+            new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }),
+          );
+        } else if (msg.type === 'warp-focus') {
+          canvas?.focus();
+        } else if (msg.type === 'warp-send-key' && canvas) {
+          canvas.focus();
+          // Warp tracks modifiers from their own key events, so press them around the key. Each
+          // event's modifier flags must match what's held at that moment: a Meta keyup still
+          // flagged metaKey leaves Warp thinking Cmd is down, and it drops the next real key.
+          const modifiers = [
+            msg.cmd && { key: 'Meta', code: 'MetaLeft', flag: 'metaKey' },
+            msg.ctrl && { key: 'Control', code: 'ControlLeft', flag: 'ctrlKey' },
+            msg.alt && { key: 'Alt', code: 'AltLeft', flag: 'altKey' },
+            msg.shift && { key: 'Shift', code: 'ShiftLeft', flag: 'shiftKey' },
+          ].filter(Boolean);
+          const held = { metaKey: false, ctrlKey: false, altKey: false, shiftKey: false };
+          const send = (type, key, code) =>
+            canvas.dispatchEvent(
+              new KeyboardEvent(type, { key, code, ...held, bubbles: true, cancelable: true }),
+            );
+          for (const modifier of modifiers) {
+            held[modifier.flag] = true;
+            send('keydown', modifier.key, modifier.code);
+          }
+          send('keydown', msg.key, msg.code);
+          send('keyup', msg.key, msg.code);
+          for (const modifier of modifiers.reverse()) {
+            held[modifier.flag] = false;
+            send('keyup', modifier.key, modifier.code);
+          }
+        }
+      });
+    }
+
+    window.addEventListener('focus', () => document.querySelector('canvas')?.focus());
+
+    // Warp-on-web keeps settings in localStorage, whose origin (our random port) changes every
+    // session. Embedded, the extension owns the durable copy: we load its snapshot before Warp
+    // starts and report every change back.
+    function mirrorLocalStorage() {
+      const pending = new Map();
+      let flushTimer = null;
+      const queue = (key, value) => {
+        pending.set(key, value);
+        clearTimeout(flushTimer);
+        flushTimer = setTimeout(() => {
+          window.parent.postMessage(
+            { type: 'warp-storage-changes', changes: Object.fromEntries(pending) },
+            '*',
+          );
+          pending.clear();
+        }, 200);
+      };
+      const { setItem, removeItem, clear } = Storage.prototype;
+      Storage.prototype.setItem = function (key, value) {
+        setItem.call(this, key, value);
+        if (this === window.localStorage) queue(String(key), String(value));
+      };
+      Storage.prototype.removeItem = function (key) {
+        removeItem.call(this, key);
+        if (this === window.localStorage) queue(String(key), null);
+      };
+      Storage.prototype.clear = function () {
+        if (this === window.localStorage) {
+          for (let i = 0; i < this.length; i++) queue(this.key(i), null);
+        }
+        clear.call(this);
+      };
+    }
+
+    let started = false;
+    function startWarp(snapshot, historyJson, workflowsJson, sessionJson) {
+      if (started) return;
+      started = true;
+      phase('settingsReceived');
+      // Command history the extension persisted (SQLite, like desktop Warp); read by our Warp
+      // build at startup, and new commands are reported back as they start and finish.
+      window.warpPanelCommandHistory = () => historyJson ?? null;
+      // Local workflow files (~/.warp/workflows, the workspace's .warp/workflows) for Ctrl+R.
+      window.warpPanelWorkflows = () => workflowsJson ?? null;
+      // Tabs from the last panel to close in any VS Code window (sessionStore.js); Warp sends
+      // its layout when it changes and each finished block (app/src/persistence/host_session.rs).
+      window.warpPanelSession = () => sessionJson ?? null;
+      if (embedded) {
+        window.warpPanelSaveSession = (json) =>
+          window.parent.postMessage({ type: 'warp-save-session', json: String(json) }, '*');
+        window.warpPanelSaveBlock = (paneUuid, json) =>
+          window.parent.postMessage(
+            { type: 'warp-save-block', paneUuid: String(paneUuid), json: String(json) },
+            '*',
+          );
+      }
+      if (embedded) {
+        window.warpPanelRecordCommand = (kind, json) =>
+          window.parent.postMessage({ type: 'warp-record-command', kind, json }, '*');
+      }
+      if (snapshot) {
+        window.localStorage.clear();
+        for (const [key, value] of Object.entries(snapshot)) window.localStorage.setItem(key, value);
+      }
+      if (embedded) mirrorLocalStorage();
+      // No `window.warpUserHandoff` is defined on purpose: without it, our Warp build skips the
+      // Warp sign-in screen (app/src/root_view.rs, handle_web_handoff_event).
+      loadWarp().catch((error) => {
+        loading.set(`Warp failed to start: ${error?.message || error}`, null);
+        loading.bar.classList.remove('indeterminate');
+      });
+    }
+
+    if (embedded) {
+      window.addEventListener('message', (e) => {
+        if (e.source === window.parent && e.data?.type === 'warp-storage-snapshot') {
+          startWarp(e.data.entries || {}, e.data.history ?? null, e.data.workflows ?? null, e.data.session ?? null);
+        }
+      });
+      window.parent.postMessage({ type: 'warp-storage-request' }, '*');
+      // Start anyway if the extension doesn't answer; settings then won't persist this session.
+      setTimeout(() => startWarp(null), 5000);
+    } else {
+      startWarp(null);
+    }
+  </script>
+</body>
+</html>

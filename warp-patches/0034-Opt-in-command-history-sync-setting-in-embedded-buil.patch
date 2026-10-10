@@ -1,0 +1,171 @@
+From a25f74f23786a541838bbca756d4666e22ef636d Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 02:32:20 -0700
+Subject: [PATCH 34/49] Opt-in command history sync setting in embedded builds
+
+Adds `host.history_sync` (off by default) and a "Sync command history" toggle on the Privacy
+page. The host app does the syncing: it shares the newest commands through VS Code Settings Sync
+and merges other machines' commands into its history before Warp loads it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/settings/host_ai.rs           | 10 +++
+ app/src/settings_view/privacy_page.rs | 94 ++++++++++++++++++++++++++-
+ 2 files changed, 101 insertions(+), 3 deletions(-)
+
+diff --git a/app/src/settings/host_ai.rs b/app/src/settings/host_ai.rs
+index 36a3015..da8c1dd 100644
+--- a/app/src/settings/host_ai.rs
++++ b/app/src/settings/host_ai.rs
+@@ -142,6 +142,16 @@ define_settings_group!(HostAiSettings, settings: [
+         toml_path: "host.ai.prompt_suggestions_agent",
+         description: "Command that starts the CLI coding agent for an accepted prompt suggestion; the prompt is added as its last argument (e.g. \"claude\", \"codex\", \"gemini -i\").",
+     },
++    history_sync: HostHistorySync {
++        type: bool,
++        default: false,
++        supported_platforms: SupportedPlatforms::ALL,
++        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
++        surface: settings::SettingSurfaces::GUI,
++        private: false,
++        toml_path: "host.history_sync",
++        description: "Sync your newest commands (up to 500) across machines with VS Code Settings Sync. Commands starting with a space aren't synced.",
++    },
+     keys_to_host: HostKeysToHost {
+         type: HashMap<String, String>,
+         default: HashMap::default(),
+diff --git a/app/src/settings_view/privacy_page.rs b/app/src/settings_view/privacy_page.rs
+index f602fa6..d0cd73e 100644
+--- a/app/src/settings_view/privacy_page.rs
++++ b/app/src/settings_view/privacy_page.rs
+@@ -43,7 +43,10 @@ use crate::channel::ChannelState;
+ use crate::modal::{Modal, ModalEvent, ModalViewState};
+ use crate::send_telemetry_from_ctx;
+ use crate::server::telemetry::TelemetryEvent;
+-use crate::settings::{AISettings, CustomSecretRegex, PrivacySettings, RegexDisplayInfo};
++use crate::settings::{
++    AISettings, CustomSecretRegex, HostAiSettings, HostHistorySync, PrivacySettings,
++    RegexDisplayInfo,
++};
+ use crate::settings_view::privacy::AddRegexModalViewState;
+ use crate::settings_view::render_body_item_label;
+ use crate::settings_view::settings_page::CONTENT_FONT_SIZE;
+@@ -220,10 +223,14 @@ impl PrivacyPageView {
+ 
+     fn build_page() -> PageType<Self> {
+         // Embedded (`remote_tty`) builds have no Warp account, cloud or telemetry (forced off in
+-        // `PrivacySettings`): only the local secret redaction is left.
++        // `PrivacySettings`): only the local secret redaction is left, plus the host app's opt-in
++        // command history sync.
+         if cfg!(feature = "remote_tty") {
+             return PageType::new_uncategorized(
+-                vec![Box::new(SecretRedactionWidget::default())],
++                vec![
++                    Box::new(SecretRedactionWidget::default()),
++                    Box::new(HostHistorySyncWidget::default()),
++                ],
+                 Some(PageTitle::new("Privacy")),
+             );
+         }
+@@ -512,6 +519,7 @@ pub enum PrivacyPageAction {
+     ShowAddRegexModal,
+     AddRecommendedRegex(usize),
+     SwitchSecretRedactionTab(SecretRedactionTab),
++    ToggleHostHistorySync,
+ }
+ 
+ #[derive(Clone, Copy, Debug, PartialEq)]
+@@ -585,6 +593,13 @@ impl TypedActionView for PrivacyPageView {
+             }
+             PrivacyPageAction::ToggleTelemetry => self.toggle_telemetry(ctx),
+             PrivacyPageAction::ToggleCrashReporting => self.toggle_crash_reporting(ctx),
++            PrivacyPageAction::ToggleHostHistorySync => {
++                HostAiSettings::handle(ctx).update(ctx, |settings, ctx| {
++                    let enabled = !*settings.history_sync;
++                    report_if_error!(settings.history_sync.set_value(enabled, ctx));
++                });
++                ctx.notify();
++            }
+             PrivacyPageAction::ToggleCloudConversationStorage => {
+                 self.toggle_cloud_conversation_storage(ctx)
+             }
+@@ -1648,6 +1663,79 @@ impl SettingsWidget for CrashReportsWidget {
+     }
+ }
+ 
++/// Opt-in sync of the newest commands across machines, done by the host app (VS Code Settings
++/// Sync), in embedded builds.
++#[derive(Default)]
++struct HostHistorySyncWidget {
++    switch_state: SwitchStateHandle,
++}
++
++impl SettingsWidget for HostHistorySyncWidget {
++    type View = PrivacyPageView;
++
++    fn search_terms(&self) -> &str {
++        "command history sync machines settings sync"
++    }
++
++    fn render(
++        &self,
++        view: &Self::View,
++        appearance: &Appearance,
++        app: &AppContext,
++    ) -> Box<dyn Element> {
++        let ui_builder = appearance.ui_builder();
++        let local_only_icon_state = LocalOnlyIconState::for_setting(
++            HostHistorySync::storage_key(),
++            HostHistorySync::sync_to_cloud(),
++            &mut view.local_only_icon_tooltip_states.borrow_mut(),
++            app,
++        );
++        Flex::column()
++            .with_child(render_body_item::<PrivacyPageAction>(
++                "Sync command history".into(),
++                None,
++                local_only_icon_state,
++                ToggleState::Enabled,
++                appearance,
++                ui_builder
++                    .switch(self.switch_state.clone())
++                    .check(*HostAiSettings::as_ref(app).history_sync)
++                    .build()
++                    .on_click(move |ctx, _, _| {
++                        ctx.dispatch_typed_action(PrivacyPageAction::ToggleHostHistorySync)
++                    })
++                    .finish(),
++                None,
++            ))
++            .with_child(
++                ui_builder
++                    .paragraph(
++                        "Syncs your newest 500 commands to your other machines with VS Code \
++                         Settings Sync. Commands can contain secrets; ones starting with a space \
++                         aren't synced. Turning this off removes the synced copy."
++                            .to_owned(),
++                    )
++                    .with_style(UiComponentStyles {
++                        font_color: Some(
++                            appearance
++                                .theme()
++                                .sub_text_color(appearance.theme().surface_2())
++                                .into_solid(),
++                        ),
++                        margin: Some(
++                            Coords::default()
++                                .top(styles::DESCRIPTION_NEGATIVE_MARGIN_OFFSET)
++                                .bottom(styles::DESCRIPTION_MARGIN_BOTTOM),
++                        ),
++                        ..Default::default()
++                    })
++                    .build()
++                    .finish(),
++            )
++            .finish()
++    }
++}
++
+ #[derive(Default)]
+ struct CloudConversationStorageWidget {
+     switch_state: SwitchStateHandle,

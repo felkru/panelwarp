@@ -1,0 +1,212 @@
+From 6773c83764672ccd653ddbef31fe299f7a9059ea Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 13:45:57 -0700
+Subject: [PATCH 07/49] embedded: Anthropic API key row in Warp Agent settings
+
+The key is handed straight to the host app (window.warpPanelStoreApiKey) and never kept in
+Warp. Deep link: warp://settings?widget=host_api_key. The '#' trigger toggle is enabled whenever
+AI command search is available.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/platform/wasm.rs                 |   9 ++
+ app/src/settings_view/mod.rs             |   4 +
+ app/src/settings_view/warp_agent_page.rs | 125 ++++++++++++++++++++++-
+ 3 files changed, 136 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/platform/wasm.rs b/app/src/platform/wasm.rs
+index 9a299bc..cf613c7 100644
+--- a/app/src/platform/wasm.rs
++++ b/app/src/platform/wasm.rs
+@@ -30,6 +30,9 @@ mod ffi {
+         #[wasm_bindgen(js_name = "warpPanelOpenSettingsFile", catch)]
+         pub fn open_settings_file_in_host() -> Result<(), JsValue>;
+ 
++        #[wasm_bindgen(js_name = "warpPanelStoreApiKey", catch)]
++        pub fn store_api_key(provider: &str, key: &str) -> Result<(), JsValue>;
++
+         #[wasm_bindgen(js_name = "warpPanelGenerateCommands", catch)]
+         pub fn generate_commands(
+             prompt: &str,
+@@ -90,6 +93,12 @@ pub async fn generate_commands_in_host(
+         .collect())
+ }
+ 
++/// Hands an AI provider API key to the embedding host app, which stores it (VS Code:
++/// SecretStorage). Returns false if the host doesn't provide `window.warpPanelStoreApiKey`.
++pub fn store_api_key_in_host(provider: &str, key: &str) -> bool {
++    ffi::store_api_key(provider, key).is_ok()
++}
++
+ /// Asks the embedding host app (e.g. the VS Code panel) to open its settings file, since the web
+ /// build keeps settings in localStorage rather than a file. Returns false if the host doesn't
+ /// provide `window.warpPanelOpenSettingsFile`.
+diff --git a/app/src/settings_view/mod.rs b/app/src/settings_view/mod.rs
+index b9a19aa..2dcdfc1 100644
+--- a/app/src/settings_view/mod.rs
++++ b/app/src/settings_view/mod.rs
+@@ -462,6 +462,10 @@ pub fn settings_widget_deeplink_target(slug: &str) -> Option<(SettingsSection, &
+             features_page::global_hotkey_widget_id(),
+         )),
+         "custom_router" => Some((SettingsSection::WarpAgent, custom_model_routers_widget_id())),
++        "host_api_key" => Some((
++            SettingsSection::WarpAgent,
++            warp_agent_page::host_api_key_widget_id(),
++        )),
+         #[cfg(not(target_family = "wasm"))]
+         "cli_agents" => Some((
+             SettingsSection::ThirdPartyCLIAgents,
+diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
+index d36f30e..6cb8023 100644
+--- a/app/src/settings_view/warp_agent_page.rs
++++ b/app/src/settings_view/warp_agent_page.rs
+@@ -2289,6 +2289,14 @@ impl WarpAgentPageView {
+         let ai_settings = AISettings::as_ref(ctx);
+ 
+         let mut categories: Vec<Category<Self>> = Vec::new();
++        // Embedded (`remote_tty`) builds answer AI requests with the host app's own provider;
++        // the key is entered here and stored by the host, never in Warp.
++        if cfg!(feature = "remote_tty") {
++            categories.push(Category::new(
++                "AI provider",
++                vec![Box::new(HostApiKeyWidget::new(ctx))],
++            ));
++        }
+ 
+         if ai_settings
+             .intelligent_autosuggestions_enabled_internal
+@@ -3751,12 +3759,12 @@ impl SettingsWidget for AiCommandSearchHashTriggerWidget {
+         _appearance: &Appearance,
+         app: &AppContext,
+     ) -> Box<dyn Element> {
+-        let is_any_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
++        let is_command_search_enabled = AISettings::as_ref(app).is_ai_command_search_enabled(app);
+         render_ai_setting_toggle::<EnableAiCommandSearchHashTrigger>(
+             "Enable '#' trigger for AI Command Search",
+             WarpAgentPageAction::ToggleAiCommandSearchHashTrigger,
+             *InputSettings::as_ref(app).enable_ai_command_search_hash_trigger,
+-            is_any_ai_enabled,
++            is_command_search_enabled,
+             self.toggle.clone(),
+             &view.local_only_icon_tooltip_states,
+             app,
+@@ -6818,6 +6826,119 @@ pub(crate) fn custom_model_routers_widget_id() -> &'static str {
+     CustomModelRoutersWidget::static_widget_id()
+ }
+ 
++/// Exposed for the `warp://settings?widget=host_api_key` deeplink (see
++/// `settings_widget_deeplink_target`).
++pub(crate) fn host_api_key_widget_id() -> &'static str {
++    HostApiKeyWidget::static_widget_id()
++}
++
++const HOST_API_KEY_PLACEHOLDER: &str = "sk-ant-...";
++const HOST_API_KEY_SAVED_PLACEHOLDER: &str = "Saved in VS Code (paste a new key to replace it)";
++
++/// Anthropic API key for embedded (`remote_tty`) builds. The key is handed straight to the host
++/// app, which stores it (VS Code: SecretStorage); Warp never keeps it.
++struct HostApiKeyWidget {
++    editor: ViewHandle<EditorView>,
++}
++
++impl HostApiKeyWidget {
++    fn new(ctx: &mut ViewContext<WarpAgentPageView>) -> Self {
++        let editor = ctx.add_typed_action_view(|ctx| {
++            let appearance = Appearance::handle(ctx).as_ref(ctx);
++            let options = SingleLineEditorOptions {
++                is_password: true,
++                propagate_and_no_op_vertical_navigation_keys: PropagateAndNoOpNavigationKeys::Always,
++                text: TextOptions {
++                    font_size_override: Some(appearance.ui_font_size()),
++                    font_family_override: Some(appearance.monospace_font_family()),
++                    text_colors_override: Some(TextColors {
++                        default_color: appearance.theme().active_ui_text_color(),
++                        disabled_color: appearance.theme().disabled_ui_text_color(),
++                        hint_color: appearance.theme().disabled_ui_text_color(),
++                    }),
++                    ..Default::default()
++                },
++                ..Default::default()
++            };
++            let mut editor = EditorView::single_line(options, ctx);
++            editor.set_placeholder_text(HOST_API_KEY_PLACEHOLDER, ctx);
++            editor
++        });
++        ctx.subscribe_to_view(&editor, |_, editor, event, ctx| {
++            if !matches!(event, EditorEvent::Blurred | EditorEvent::Enter) {
++                return;
++            }
++            let key = editor.as_ref(ctx).buffer_text(ctx).trim().to_owned();
++            if key.is_empty() {
++                return;
++            }
++            #[cfg(target_family = "wasm")]
++            let saved = crate::platform::wasm::store_api_key_in_host("anthropic", &key);
++            #[cfg(not(target_family = "wasm"))]
++            let saved = false;
++            if saved {
++                editor.update(ctx, |editor, ctx| {
++                    editor.set_buffer_text("", ctx);
++                    editor.set_placeholder_text(HOST_API_KEY_SAVED_PLACEHOLDER, ctx);
++                });
++            }
++        });
++        Self { editor }
++    }
++}
++
++impl SettingsWidget for HostApiKeyWidget {
++    type View = WarpAgentPageView;
++
++    fn search_terms(&self) -> &str {
++        "ai provider anthropic claude api key byok bring your own key command search"
++    }
++
++    fn render(
++        &self,
++        _view: &Self::View,
++        appearance: &Appearance,
++        app: &AppContext,
++    ) -> Box<dyn Element> {
++        let editor_style = UiComponentStyles {
++            padding: Some(Coords {
++                top: 10.,
++                bottom: 10.,
++                left: 16.,
++                right: 16.,
++            }),
++            background: Some(appearance.theme().surface_2().into()),
++            ..Default::default()
++        };
++        let label = Text::new_inline(
++            "Anthropic API key",
++            appearance.ui_font_family(),
++            CONTENT_FONT_SIZE,
++        )
++        .with_color(styles::header_font_color(true, app).into())
++        .finish();
++        let description = Text::new(
++            "Used for AI Command Search (#). Stored in VS Code's secret storage, never in Warp.",
++            appearance.ui_font_family(),
++            CONTENT_FONT_SIZE,
++        )
++        .with_color(styles::description_font_color(true, app).into())
++        .finish();
++        let input = appearance
++            .ui_builder()
++            .text_input(self.editor.clone())
++            .with_style(editor_style)
++            .build()
++            .finish();
++        Flex::column()
++            .with_spacing(8.)
++            .with_child(label)
++            .with_child(description)
++            .with_child(input)
++            .finish()
++    }
++}
++
+ #[cfg(feature = "local_fs")]
+ #[derive(Default)]
+ struct AddCustomRouterWidget;

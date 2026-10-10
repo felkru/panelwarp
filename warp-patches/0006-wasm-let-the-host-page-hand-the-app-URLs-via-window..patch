@@ -1,0 +1,79 @@
+From e45f582addb5a02db402e66638caebf4afce0335 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 13:45:57 -0700
+Subject: [PATCH 06/49] wasm: let the host page hand the app URLs via
+ window.warpOpenUrl
+
+Embedders can open warp:// links (e.g. warp://settings?widget=...) the way the OS does on
+desktop.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/warpui/src/platform/wasm/mod.rs            | 15 +++++++++++++++
+ crates/warpui/src/windowing/winit/app.rs          |  5 +++++
+ .../warpui/src/windowing/winit/event_loop/mod.rs  |  3 +++
+ 3 files changed, 23 insertions(+)
+
+diff --git a/crates/warpui/src/platform/wasm/mod.rs b/crates/warpui/src/platform/wasm/mod.rs
+index 575d945..a51d01b 100644
+--- a/crates/warpui/src/platform/wasm/mod.rs
++++ b/crates/warpui/src/platform/wasm/mod.rs
+@@ -168,6 +168,21 @@ fn is_browser_history_shortcut(event: &web_sys::KeyboardEvent, key: &str) -> boo
+     event.alt_key() && matches!(key, "arrowleft" | "arrowright")
+ }
+ 
++/// Exposes `window.warpOpenUrl(url)` so an embedding host page can hand the app URLs (e.g.
++/// `warp://settings/warp_agent`) the way the OS does on desktop.
++pub(crate) fn add_open_url_hook(event_loop_proxy: winit::event_loop::EventLoopProxy<CustomEvent>) {
++    let open_url = wasm_bindgen::closure::Closure::<dyn Fn(String)>::new(move |url: String| {
++        let _ = event_loop_proxy.send_event(CustomEvent::OpenUrls(vec![url]));
++    });
++    let _ = js_sys::Reflect::set(
++        &gloo::utils::window(),
++        &"warpOpenUrl".into(),
++        open_url.as_ref(),
++    );
++    // The hook lives for the lifetime of the page.
++    open_url.forget();
++}
++
+ pub(crate) fn add_paste_listener(event_loop_proxy: winit::event_loop::EventLoopProxy<CustomEvent>) {
+     EventListener::new(&gloo::utils::document(), "paste", move |event| {
+         let event = event.dyn_ref::<web_sys::ClipboardEvent>().unwrap_throw();
+diff --git a/crates/warpui/src/windowing/winit/app.rs b/crates/warpui/src/windowing/winit/app.rs
+index 66287a3..2658f85 100644
+--- a/crates/warpui/src/windowing/winit/app.rs
++++ b/crates/warpui/src/windowing/winit/app.rs
+@@ -47,6 +47,10 @@ pub enum CustomEvent {
+     /// multiple `Focused` events into a single `ActiveWindowChanged` event on the next tick of the
+     /// [`winit::event_loop::EventLoop`].
+     ActiveWindowChanged,
++    /// Open the given URLs as if the OS had asked the app to (e.g. `warp://settings/...`). On wasm
++    /// this is how an embedding host page hands URLs to the app.
++    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
++    OpenUrls(Vec<String>),
+     /// Update the UI App using the given closure.
+     UpdateUIApp(#[derivative(Debug = "ignore")] Box<dyn FnOnce(&mut AppContext) + Send + Sync>),
+     RequestUserAttention {
+@@ -187,6 +191,7 @@ impl App {
+                 super::linux::ensure_cursor_theme();
+             } else if #[cfg(target_family = "wasm")] {
+                 crate::platform::wasm::add_paste_listener(event_loop.create_proxy());
++                crate::platform::wasm::add_open_url_hook(event_loop.create_proxy());
+                 if callbacks.on_internet_reachability_changed.is_some() {
+                     crate::platform::wasm::add_network_connection_listener(event_loop.create_proxy());
+                 }
+diff --git a/crates/warpui/src/windowing/winit/event_loop/mod.rs b/crates/warpui/src/windowing/winit/event_loop/mod.rs
+index 02e0a9d..762c536 100644
+--- a/crates/warpui/src/windowing/winit/event_loop/mod.rs
++++ b/crates/warpui/src/windowing/winit/event_loop/mod.rs
+@@ -645,6 +645,9 @@ impl EventLoop {
+             Event::UserEvent(CustomEvent::UpdateUIApp(callback)) => {
+                 self.ui_app.update(callback);
+             }
++            Event::UserEvent(CustomEvent::OpenUrls(urls)) => {
++                self.callbacks.open_urls(urls);
++            }
+             Event::UserEvent(CustomEvent::GlobalShortcutTriggered(shortcut)) => {
+                 self.callbacks.global_shortcut_triggered(shortcut)
+             }

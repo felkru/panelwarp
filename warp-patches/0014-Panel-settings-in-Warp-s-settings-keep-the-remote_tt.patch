@@ -1,0 +1,604 @@
+From ce66a341624999b0b57296ee4b9afaf5e97dc39d Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 15:05:22 -0700
+Subject: [PATCH 14/49] Panel settings in Warp's settings; keep the remote_tty
+ init line out of shell history
+
+Embedded (remote_tty) builds get a HostAiSettings group (host.ai.* and
+host.keys_to_host in settings.toml) with rows in the AI provider settings:
+fast model, expanded model, expanded effort, private routing and recent
+commands. The host app reads them from Warp's stored settings, so Warp is the
+one place to configure the panel. Turning private routing off asks the host to
+confirm (window.warpPanelConfirm); recent commands can only be set while it is
+on.
+
+The init line remote_tty types into new shells now starts with a space, so
+HIST_IGNORE_SPACE keeps it out of the user's history file.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/platform/wasm.rs                  |  18 ++
+ app/src/settings/host_ai.rs               |  74 +++++
+ app/src/settings/init.rs                  |   2 +
+ app/src/settings/mod.rs                   |   2 +
+ app/src/settings_view/warp_agent_page.rs  | 359 +++++++++++++++++++++-
+ app/src/terminal/remote_tty/event_loop.rs |   4 +-
+ 6 files changed, 457 insertions(+), 2 deletions(-)
+ create mode 100644 app/src/settings/host_ai.rs
+
+diff --git a/app/src/platform/wasm.rs b/app/src/platform/wasm.rs
+index a2caa97..ef1c2bf 100644
+--- a/app/src/platform/wasm.rs
++++ b/app/src/platform/wasm.rs
+@@ -39,6 +39,10 @@ mod ffi {
+         #[wasm_bindgen(js_name = "warpPanelRecordCommand", catch)]
+         pub fn record_command(kind: &str, json: &str) -> Result<(), JsValue>;
+ 
++        #[wasm_bindgen(js_name = "warpPanelConfirm", catch)]
++        pub fn confirm(message: &str, detail: &str, confirm_label: &str)
++            -> Result<js_sys::Promise, JsValue>;
++
+         #[wasm_bindgen(js_name = "warpPanelGenerateCommands", catch)]
+         pub fn generate_commands(
+             prompt: &str,
+@@ -103,6 +107,20 @@ pub async fn generate_commands_in_host(
+         .collect())
+ }
+ 
++/// Asks the embedding host app to confirm an action with a modal dialog
++/// (`window.warpPanelConfirm(message, detail, confirmLabel)`, resolving to a boolean). Resolves
++/// to false if the host doesn't provide it or the user cancels.
++pub async fn confirm_in_host(message: &str, detail: &str, confirm_label: &str) -> bool {
++    let Ok(promise) = ffi::confirm(message, detail, confirm_label) else {
++        return false;
++    };
++    wasm_bindgen_futures::JsFuture::from(promise)
++        .await
++        .ok()
++        .and_then(|value| value.as_bool())
++        .unwrap_or(false)
++}
++
+ /// Hands an AI provider API key to the embedding host app, which stores it (VS Code:
+ /// SecretStorage). Returns false if the host doesn't provide `window.warpPanelStoreApiKey`.
+ pub fn store_api_key_in_host(provider: &str, key: &str) -> bool {
+diff --git a/app/src/settings/host_ai.rs b/app/src/settings/host_ai.rs
+new file mode 100644
+index 0000000..1cd9229
+--- /dev/null
++++ b/app/src/settings/host_ai.rs
+@@ -0,0 +1,74 @@
++//! Settings for embedded (`remote_tty`) builds, read by the embedding host app (the VS Code
++//! panel) from Warp's stored settings, so Warp's settings UI and settings file are the one place
++//! to configure the panel. The host answers AI requests through OpenRouter with these.
++
++use std::collections::HashMap;
++
++use settings::macros::define_settings_group;
++use settings::{RespectUserSyncSetting, SupportedPlatforms, SyncToCloud};
++
++/// Reasoning effort choices for the expanded AI Command Search stage (OpenRouter's values).
++pub const HOST_AI_EFFORT_CHOICES: [&str; 4] = ["minimal", "low", "medium", "high"];
++
++define_settings_group!(HostAiSettings, settings: [
++    fast_model: HostAiFastModel {
++        type: String,
++        default: "deepseek/deepseek-v4.1-flash".to_owned(),
++        supported_platforms: SupportedPlatforms::ALL,
++        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
++        surface: settings::SettingSurfaces::GUI,
++        private: false,
++        toml_path: "host.ai.fast_model",
++        description: "OpenRouter model for the first, fast AI Command Search suggestions.",
++    },
++    expanded_model: HostAiExpandedModel {
++        type: String,
++        default: "anthropic/claude-sonnet-5.5".to_owned(),
++        supported_platforms: SupportedPlatforms::ALL,
++        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
++        surface: settings::SettingSurfaces::GUI,
++        private: false,
++        toml_path: "host.ai.expanded_model",
++        description: "OpenRouter model that adds more AI Command Search suggestions once typing pauses. Empty: fast suggestions only.",
++    },
++    expanded_effort: HostAiExpandedEffort {
++        type: String,
++        default: "low".to_owned(),
++        supported_platforms: SupportedPlatforms::ALL,
++        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
++        surface: settings::SettingSurfaces::GUI,
++        private: false,
++        toml_path: "host.ai.expanded_effort",
++        description: "Reasoning effort for the expanded model: minimal, low, medium or high.",
++    },
++    private_routing: HostAiPrivateRouting {
++        type: bool,
++        default: true,
++        supported_platforms: SupportedPlatforms::ALL,
++        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
++        surface: settings::SettingSurfaces::GUI,
++        private: false,
++        toml_path: "host.ai.private_routing",
++        description: "Only send AI requests to OpenRouter hosts that don't train on or retain them (zero data retention).",
++    },
++    recent_commands_in_context: HostAiRecentCommandsInContext {
++        type: u32,
++        default: 0,
++        supported_platforms: SupportedPlatforms::ALL,
++        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
++        surface: settings::SettingSurfaces::GUI,
++        private: false,
++        toml_path: "host.ai.recent_commands_in_context",
++        description: "How many of your most recent commands to send with AI Command Search requests. Only used while private routing is on.",
++    },
++    keys_to_host: HostKeysToHost {
++        type: HashMap<String, String>,
++        default: HashMap::default(),
++        supported_platforms: SupportedPlatforms::ALL,
++        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
++        surface: settings::SettingSurfaces::GUI,
++        private: false,
++        toml_path: "host.keys_to_host",
++        description: "Keys that go to the host app (VS Code) instead of Warp, mapped to the host command they run, e.g. \"cmd+shift+p\" = \"workbench.action.showCommands\". Added to the host's defaults; an empty command removes a default.",
++    }
++]);
+diff --git a/app/src/settings/init.rs b/app/src/settings/init.rs
+index 11b58e7..de5de97 100644
+--- a/app/src/settings/init.rs
++++ b/app/src/settings/init.rs
+@@ -11,6 +11,7 @@ use warpui_extras::user_preferences;
+ use super::app_icon::AppIconSettings;
+ use super::app_installation_detection::UserAppInstallDetectionSettings;
+ use super::cloud_preferences::CloudPreferencesSettings;
++use super::host_ai::HostAiSettings;
+ use super::initializer::SettingsInitializer;
+ use super::native_preference::NativePreferenceSettings;
+ use super::{
+@@ -92,6 +93,7 @@ pub fn register_all_settings(ctx: &mut AppContext) {
+     AppIconSettings::register(ctx);
+     AppEditorSettings::register(ctx);
+     InputSettings::register(ctx);
++    HostAiSettings::register(ctx);
+     WarpifySettings::register(ctx);
+     AltScreenReporting::register(ctx);
+     UndoCloseSettings::register(ctx);
+diff --git a/app/src/settings/mod.rs b/app/src/settings/mod.rs
+index 9ab31b8..fb56919 100644
+--- a/app/src/settings/mod.rs
++++ b/app/src/settings/mod.rs
+@@ -12,6 +12,7 @@ mod debug;
+ mod editor;
+ mod emacs_bindings;
+ pub mod font;
++mod host_ai;
+ mod gpu;
+ pub mod import;
+ mod init;
+@@ -56,6 +57,7 @@ pub use debug::*;
+ pub use editor::*;
+ pub use emacs_bindings::*;
+ pub use font::*;
++pub use host_ai::*;
+ pub use gpu::*;
+ pub use init::*;
+ pub use input::*;
+diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
+index 204d911..106c7b9 100644
+--- a/app/src/settings_view/warp_agent_page.rs
++++ b/app/src/settings_view/warp_agent_page.rs
+@@ -93,6 +93,8 @@ use crate::server::telemetry::{
+     AgentModeAutoDetectionSettingOrigin, ToggleCodeSuggestionsSettingSource,
+ };
+ use crate::settings::{
++    HOST_AI_EFFORT_CHOICES, HostAiExpandedEffort, HostAiPrivateRouting,
++    HostAiRecentCommandsInContext, HostAiSettings,
+     AIAutoDetectionEnabled, AICommandDenylist, AISettings, AISettingsChangedEvent,
+     AgentModeQuerySuggestionsEnabled, AutoApproveBypassesCommandDenylist, AwsBedrockAutoLogin,
+     AwsBedrockCredentialsEnabled, CanUseWarpCreditsForFallback, AiCommandSearchDebounceMs, EnableAiCommandSearchHashTrigger,
+@@ -2288,6 +2290,10 @@ impl WarpAgentPageView {
+     fn build_page(ctx: &mut ViewContext<Self>) -> PageType<Self> {
+         // Created before the page borrows settings from `ctx` below.
+         let ai_command_search_debounce_widget = AiCommandSearchDebounceWidget::new(ctx);
++        let host_fast_model_widget = HostAiModelWidget::new(HostAiModelKind::Fast, ctx);
++        let host_expanded_model_widget = HostAiModelWidget::new(HostAiModelKind::Expanded, ctx);
++        let host_expanded_effort_widget = HostAiEffortWidget::new(ctx);
++        let host_recent_commands_widget = HostAiRecentCommandsWidget::new(ctx);
+         let ai_settings = AISettings::as_ref(ctx);
+ 
+         let mut categories: Vec<Category<Self>> = Vec::new();
+@@ -2367,7 +2373,17 @@ impl WarpAgentPageView {
+         if cfg!(feature = "remote_tty") {
+             categories.insert(
+                 0,
+-                Category::new("AI provider", vec![Box::new(HostApiKeyWidget::new(ctx))]),
++                Category::new(
++                    "AI provider",
++                    vec![
++                        Box::new(HostApiKeyWidget::new(ctx)),
++                        Box::new(host_fast_model_widget),
++                        Box::new(host_expanded_model_widget),
++                        Box::new(host_expanded_effort_widget),
++                        Box::new(HostAiPrivateRoutingWidget::default()),
++                        Box::new(host_recent_commands_widget),
++                    ],
++                ),
+             );
+         }
+ 
+@@ -2571,6 +2587,9 @@ pub enum WarpAgentPageAction {
+     ToggleShowInputHintText,
+     ToggleAiCommandSearchHashTrigger,
+     SetAiCommandSearchDebounceMs(u32),
++    SetHostAiExpandedEffort(String),
++    ToggleHostAiPrivateRouting,
++    SetHostAiRecentCommands(u32),
+     ToggleShowAgentTips,
+     ToggleShowOzUpdatesInZeroState,
+     SetThinkingDisplayMode(ThinkingDisplayMode),
+@@ -2912,6 +2931,53 @@ impl TypedActionView for WarpAgentPageView {
+                     report_if_error!(input_settings.ai_command_search_debounce_ms.set_value(*ms, ctx));
+                 });
+             }
++            WarpAgentPageAction::SetHostAiExpandedEffort(effort) => {
++                HostAiSettings::handle(ctx).update(ctx, |settings, ctx| {
++                    report_if_error!(settings.expanded_effort.set_value(effort.clone(), ctx));
++                });
++            }
++            WarpAgentPageAction::SetHostAiRecentCommands(count) => {
++                // Recent commands can contain secrets; they're only sent with private routing.
++                if *HostAiSettings::as_ref(ctx).private_routing {
++                    HostAiSettings::handle(ctx).update(ctx, |settings, ctx| {
++                        report_if_error!(settings.recent_commands_in_context.set_value(*count, ctx));
++                    });
++                }
++                ctx.notify();
++            }
++            WarpAgentPageAction::ToggleHostAiPrivateRouting => {
++                let set_private_routing = |enabled: bool, ctx: &mut ViewContext<Self>| {
++                    HostAiSettings::handle(ctx).update(ctx, |settings, ctx| {
++                        report_if_error!(settings.private_routing.set_value(enabled, ctx));
++                    });
++                    ctx.notify();
++                };
++                if !*HostAiSettings::as_ref(ctx).private_routing {
++                    set_private_routing(true, ctx);
++                } else {
++                    // Turning it off lets hosts that retain requests serve them: the host app asks
++                    // the user to confirm first.
++                    #[cfg(target_family = "wasm")]
++                    ctx.spawn(
++                        crate::platform::wasm::confirm_in_host(
++                            "Allow hosts that retain your AI requests?",
++                            "With private routing off, OpenRouter may send your # requests (what you \
++                             type after #, plus your OS and shell) to hosts such as Azure or \
++                             Anthropic that keep request data for a while and may log it. Recent \
++                             commands are no longer sent. Check the host's data-retention and \
++                             training policy on OpenRouter's model page.",
++                            "Allow",
++                        ),
++                        move |_, confirmed, ctx| {
++                            if confirmed {
++                                set_private_routing(false, ctx);
++                            }
++                        },
++                    );
++                    #[cfg(not(target_family = "wasm"))]
++                    set_private_routing(false, ctx);
++                }
++            }
+             WarpAgentPageAction::ToggleAiCommandSearchHashTrigger => {
+                 InputSettings::handle(ctx).update(ctx, |input_settings, ctx| {
+                     report_if_error!(
+@@ -7019,6 +7085,297 @@ impl SettingsWidget for HostApiKeyWidget {
+     }
+ }
+ 
++fn host_settings_editor(
++    text: &str,
++    placeholder: &str,
++    ctx: &mut ViewContext<WarpAgentPageView>,
++) -> ViewHandle<EditorView> {
++    ctx.add_typed_action_view(|ctx| {
++        let appearance = Appearance::handle(ctx).as_ref(ctx);
++        let options = SingleLineEditorOptions {
++            propagate_and_no_op_vertical_navigation_keys: PropagateAndNoOpNavigationKeys::Always,
++            text: TextOptions {
++                font_size_override: Some(appearance.ui_font_size()),
++                font_family_override: Some(appearance.monospace_font_family()),
++                text_colors_override: Some(TextColors {
++                    default_color: appearance.theme().active_ui_text_color(),
++                    disabled_color: appearance.theme().disabled_ui_text_color(),
++                    hint_color: appearance.theme().disabled_ui_text_color(),
++                }),
++                ..Default::default()
++            },
++            ..Default::default()
++        };
++        let mut editor = EditorView::single_line(options, ctx);
++        editor.set_buffer_text(text, ctx);
++        editor.set_placeholder_text(placeholder, ctx);
++        editor
++    })
++}
++
++fn render_host_setting_column(
++    label: &str,
++    description: &str,
++    control: Box<dyn Element>,
++    appearance: &Appearance,
++    app: &AppContext,
++) -> Box<dyn Element> {
++    Flex::column()
++        .with_spacing(8.)
++        .with_child(
++            Text::new_inline(label.to_owned(), appearance.ui_font_family(), CONTENT_FONT_SIZE)
++                .with_color(styles::header_font_color(true, app).into())
++                .finish(),
++        )
++        .with_child(
++            Text::new(description.to_owned(), appearance.ui_font_family(), CONTENT_FONT_SIZE)
++                .with_color(styles::description_font_color(true, app).into())
++                .finish(),
++        )
++        .with_child(control)
++        .finish()
++}
++
++#[derive(Clone, Copy)]
++enum HostAiModelKind {
++    Fast,
++    Expanded,
++}
++
++/// OpenRouter model ids for the two AI Command Search stages (embedded builds).
++struct HostAiModelWidget {
++    kind: HostAiModelKind,
++    editor: ViewHandle<EditorView>,
++}
++
++impl HostAiModelWidget {
++    fn new(kind: HostAiModelKind, ctx: &mut ViewContext<WarpAgentPageView>) -> Self {
++        let settings = HostAiSettings::as_ref(ctx);
++        let (text, placeholder) = match kind {
++            HostAiModelKind::Fast => (settings.fast_model.clone(), "deepseek/deepseek-v4.1-flash"),
++            HostAiModelKind::Expanded => (settings.expanded_model.clone(), "none (fast suggestions only)"),
++        };
++        let editor = host_settings_editor(&text, placeholder, ctx);
++        ctx.subscribe_to_view(&editor, move |_, editor, event, ctx| {
++            if !matches!(event, EditorEvent::Blurred | EditorEvent::Enter) {
++                return;
++            }
++            let mut model = editor.as_ref(ctx).buffer_text(ctx).trim().to_owned();
++            if matches!(kind, HostAiModelKind::Fast) && model.is_empty() {
++                model = "deepseek/deepseek-v4.1-flash".to_owned();
++                editor.update(ctx, |editor, ctx| editor.set_buffer_text(&model, ctx));
++            }
++            HostAiSettings::handle(ctx).update(ctx, |settings, ctx| match kind {
++                HostAiModelKind::Fast => report_if_error!(settings.fast_model.set_value(model, ctx)),
++                HostAiModelKind::Expanded => {
++                    report_if_error!(settings.expanded_model.set_value(model, ctx))
++                }
++            });
++        });
++        Self { kind, editor }
++    }
++}
++
++impl SettingsWidget for HostAiModelWidget {
++    type View = WarpAgentPageView;
++
++    fn search_terms(&self) -> &str {
++        match self.kind {
++            HostAiModelKind::Fast => "ai provider openrouter fast model deepseek command search #",
++            HostAiModelKind::Expanded => {
++                "ai provider openrouter expanded model claude sonnet command search #"
++            }
++        }
++    }
++
++    fn render(&self, _view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++        let (label, description) = match self.kind {
++            HostAiModelKind::Fast => (
++                "Fast model",
++                "OpenRouter model for the first 1-2 # suggestions. Pick a low-latency one.",
++            ),
++            HostAiModelKind::Expanded => (
++                "Expanded model",
++                "OpenRouter model that adds different # suggestions once you pause typing. \
++                 Empty: fast suggestions only.",
++            ),
++        };
++        let input = appearance
++            .ui_builder()
++            .text_input(self.editor.clone())
++            .with_style(UiComponentStyles {
++                padding: Some(Coords { top: 10., bottom: 10., left: 16., right: 16. }),
++                background: Some(appearance.theme().surface_2().into()),
++                ..Default::default()
++            })
++            .build()
++            .finish();
++        render_host_setting_column(label, description, input, appearance, app)
++    }
++}
++
++/// Reasoning effort for the expanded stage.
++struct HostAiEffortWidget {
++    dropdown: ViewHandle<Dropdown<WarpAgentPageAction>>,
++}
++
++impl HostAiEffortWidget {
++    fn new(ctx: &mut ViewContext<WarpAgentPageView>) -> Self {
++        let current = HostAiSettings::as_ref(ctx).expanded_effort.clone();
++        let dropdown = ctx.add_typed_action_view(|ctx| {
++            let mut dropdown = Dropdown::new(ctx);
++            dropdown.set_top_bar_max_width(AI_SETTINGS_DROPDOWN_WIDTH);
++            dropdown.set_menu_width(AI_SETTINGS_DROPDOWN_WIDTH, ctx);
++            dropdown.set_menu_max_height(AI_SETTINGS_DROPDOWN_MAX_HEIGHT, ctx);
++            dropdown.add_items(
++                HOST_AI_EFFORT_CHOICES
++                    .into_iter()
++                    .map(|effort| {
++                        DropdownItem::new(
++                            effort.to_owned(),
++                            WarpAgentPageAction::SetHostAiExpandedEffort(effort.to_owned()),
++                        )
++                    })
++                    .collect(),
++                ctx,
++            );
++            dropdown.set_selected_by_action(WarpAgentPageAction::SetHostAiExpandedEffort(current), ctx);
++            dropdown
++        });
++        Self { dropdown }
++    }
++}
++
++impl SettingsWidget for HostAiEffortWidget {
++    type View = WarpAgentPageView;
++
++    fn search_terms(&self) -> &str {
++        "ai provider openrouter expanded model reasoning effort thinking command search #"
++    }
++
++    fn render(&self, view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++        render_dropdown_item(
++            appearance,
++            "Expanded model effort",
++            Some("Reasoning effort for the expanded model. Higher can mean slower suggestions."),
++            None,
++            LocalOnlyIconState::for_setting(
++                HostAiExpandedEffort::storage_key(),
++                HostAiExpandedEffort::sync_to_cloud(),
++                &mut view.local_only_icon_tooltip_states.borrow_mut(),
++                app,
++            ),
++            None,
++            &self.dropdown,
++        )
++    }
++}
++
++/// Zero-data-retention routing on OpenRouter; turning it off asks the host to confirm.
++#[derive(Default)]
++struct HostAiPrivateRoutingWidget {
++    toggle: SwitchStateHandle,
++}
++
++impl SettingsWidget for HostAiPrivateRoutingWidget {
++    type View = WarpAgentPageView;
++
++    fn search_terms(&self) -> &str {
++        "ai provider openrouter private routing privacy zero data retention zdr training"
++    }
++
++    fn render(&self, view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++        let toggle = render_ai_setting_toggle::<HostAiPrivateRouting>(
++            "Private routing",
++            WarpAgentPageAction::ToggleHostAiPrivateRouting,
++            *HostAiSettings::as_ref(app).private_routing,
++            true,
++            self.toggle.clone(),
++            &view.local_only_icon_tooltip_states,
++            app,
++        );
++        Flex::column()
++            .with_spacing(4.)
++            .with_child(toggle)
++            .with_child(
++                Text::new(
++                    "Only use OpenRouter hosts that don't train on or retain your requests (for \
++                     Sonnet 5.5: Amazon Bedrock and Google Vertex).",
++                    appearance.ui_font_family(),
++                    CONTENT_FONT_SIZE,
++                )
++                .with_color(styles::description_font_color(true, app).into())
++                .finish(),
++            )
++            .finish()
++    }
++}
++
++const HOST_AI_RECENT_COMMANDS_CHOICES: [u32; 5] = [0, 1, 3, 5, 10];
++
++/// How many recent commands go along with `#` requests (only with private routing on).
++struct HostAiRecentCommandsWidget {
++    dropdown: ViewHandle<Dropdown<WarpAgentPageAction>>,
++}
++
++impl HostAiRecentCommandsWidget {
++    fn new(ctx: &mut ViewContext<WarpAgentPageView>) -> Self {
++        let current = *HostAiSettings::as_ref(ctx).recent_commands_in_context;
++        let dropdown = ctx.add_typed_action_view(|ctx| {
++            let mut dropdown = Dropdown::new(ctx);
++            dropdown.set_top_bar_max_width(AI_SETTINGS_DROPDOWN_WIDTH);
++            dropdown.set_menu_width(AI_SETTINGS_DROPDOWN_WIDTH, ctx);
++            dropdown.set_menu_max_height(AI_SETTINGS_DROPDOWN_MAX_HEIGHT, ctx);
++            dropdown.add_items(
++                HOST_AI_RECENT_COMMANDS_CHOICES
++                    .into_iter()
++                    .map(|count| {
++                        DropdownItem::new(
++                            if count == 0 { "None".to_owned() } else { count.to_string() },
++                            WarpAgentPageAction::SetHostAiRecentCommands(count),
++                        )
++                    })
++                    .collect(),
++                ctx,
++            );
++            dropdown.set_selected_by_action(WarpAgentPageAction::SetHostAiRecentCommands(current), ctx);
++            dropdown
++        });
++        Self { dropdown }
++    }
++}
++
++impl SettingsWidget for HostAiRecentCommandsWidget {
++    type View = WarpAgentPageView;
++
++    fn search_terms(&self) -> &str {
++        "ai provider recent commands history context command search # privacy"
++    }
++
++    fn render(&self, view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++        let private_routing = *HostAiSettings::as_ref(app).private_routing;
++        render_dropdown_item(
++            appearance,
++            "Recent commands in # requests",
++            Some(if private_routing {
++                "Your last commands (with exit code and directory) help # build on what you just \
++                 did. Commands can contain secrets."
++            } else {
++                "Only available with private routing on, since commands can contain secrets."
++            }),
++            None,
++            LocalOnlyIconState::for_setting(
++                HostAiRecentCommandsInContext::storage_key(),
++                HostAiRecentCommandsInContext::sync_to_cloud(),
++                &mut view.local_only_icon_tooltip_states.borrow_mut(),
++                app,
++            ),
++            (!private_routing).then(|| appearance.theme().disabled_ui_text_color()),
++            &self.dropdown,
++        )
++    }
++}
++
+ #[cfg(feature = "local_fs")]
+ #[derive(Default)]
+ struct AddCustomRouterWidget;
+diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
+index 9a3f1be..69805f5 100644
+--- a/app/src/terminal/remote_tty/event_loop.rs
++++ b/app/src/terminal/remote_tty/event_loop.rs
+@@ -215,7 +215,9 @@ impl EventLoop {
+         sink: &mut impl Sink,
+         is_honor_ps1_enabled: bool,
+     ) -> anyhow::Result<()> {
+-        let honor_ps1_env_var = format!(r#"WARP_HONOR_PS1="{}";"#, is_honor_ps1_enabled as u8);
++        // This starts the init line typed into the shell; the leading space keeps it out of the
++        // user's history file (HIST_IGNORE_SPACE / HISTCONTROL=ignorespace), like the bootstrap.
++        let honor_ps1_env_var = format!(r#" WARP_HONOR_PS1="{}";"#, is_honor_ps1_enabled as u8);
+         sink.send(Message::new_binary(honor_ps1_env_var.as_bytes().to_vec()))
+             .await?;
+ 

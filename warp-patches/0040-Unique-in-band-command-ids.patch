@@ -1,0 +1,44 @@
+From 0c45c7ff718a39cd5922b987ff3a9098d019ca91 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 15:13:44 -0700
+Subject: [PATCH 40/49] Unique in-band command ids
+
+On the web the clock only has millisecond resolution, so in-band commands
+queued together got the same id. Cancelling one of them (by id) removed the
+others as well, e.g. the startup command that loads the external commands,
+which left every command underlined as an error. Append a counter.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../command_executor/in_band_command_executor.rs      | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/app/src/terminal/model/session/command_executor/in_band_command_executor.rs b/app/src/terminal/model/session/command_executor/in_band_command_executor.rs
+index 1c9163a..46aa5c5 100644
+--- a/app/src/terminal/model/session/command_executor/in_band_command_executor.rs
++++ b/app/src/terminal/model/session/command_executor/in_band_command_executor.rs
+@@ -3,6 +3,7 @@ use std::cmp::min;
+ use std::collections::{HashMap, VecDeque};
+ use std::fmt;
+ use std::sync::Arc;
++use std::sync::atomic::{AtomicU64, Ordering};
+ 
+ use anyhow::Result;
+ use async_channel::{self, Receiver, Sender};
+@@ -398,7 +399,15 @@ impl CommandExecutor for InBandCommandExecutor {
+         _environment_variables: Option<HashMap<String, String>>,
+         _execute_command_options: ExecuteCommandOptions,
+     ) -> Result<CommandOutput> {
+-        let command_id = chrono::Local::now().timestamp_micros().to_string();
++        // The clock alone isn't unique: on the web it only has millisecond resolution, so
++        // commands queued together would share an id, and cancelling one (by id) would drop the
++        // others too. The counter suffix keeps ids unique and still all digits.
++        static NEXT_COMMAND_SUFFIX: AtomicU64 = AtomicU64::new(0);
++        let command_id = format!(
++            "{}{:03}",
++            chrono::Local::now().timestamp_micros(),
++            NEXT_COMMAND_SUFFIX.fetch_add(1, Ordering::Relaxed) % 1000
++        );
+ 
+         // If the future is aborted (via a call to `AbortHandle#abort`) we need to make sure to
+         // remove the command from the in-band generator pending command queue to ensure that

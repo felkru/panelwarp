@@ -1,0 +1,77 @@
+From 9970ae316960814f366612733d5f37d80e49e47b Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 13:40:35 -0700
+Subject: [PATCH 37/49] Always suggest a fix after a failed command in embedded
+ builds
+
+Warp now always asks the host app for Next Command while private routing is
+on; the host answers after failed commands, and after every command when
+host.ai.next_command is on. The settings row becomes "Next Command after
+every command" and says that failed commands always get a fix.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/settings/ai.rs                   | 7 +++----
+ app/src/settings/host_ai.rs              | 2 +-
+ app/src/settings_view/warp_agent_page.rs | 7 ++++---
+ 3 files changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/app/src/settings/ai.rs b/app/src/settings/ai.rs
+index a841720..9467655 100644
+--- a/app/src/settings/ai.rs
++++ b/app/src/settings/ai.rs
+@@ -2388,13 +2388,12 @@ impl AISettings {
+     }
+ 
+     /// Embedded builds have no Warp AI: the host answers Next Command with its own provider. It
+-    /// sends command output, so it's opt-in and only runs with private routing.
++    /// sends command output, so it only runs with private routing. Warp always asks; the host
++    /// answers after failed commands, and after every command when `host.ai.next_command` is on.
+     #[cfg(feature = "remote_tty")]
+     pub fn is_intelligent_autosuggestions_enabled(&self, app: &warpui::AppContext) -> bool {
+         let host = crate::settings::HostAiSettings::as_ref(app);
+-        *host.next_command
+-            && *host.private_routing
+-            && AppExecutionMode::as_ref(app).allows_active_ai()
++        *host.private_routing && AppExecutionMode::as_ref(app).allows_active_ai()
+     }
+ 
+     #[cfg(not(feature = "remote_tty"))]
+diff --git a/app/src/settings/host_ai.rs b/app/src/settings/host_ai.rs
+index 8489d3b..4130e2d 100644
+--- a/app/src/settings/host_ai.rs
++++ b/app/src/settings/host_ai.rs
+@@ -120,7 +120,7 @@ define_settings_group!(HostAiSettings, settings: [
+         surface: settings::SettingSurfaces::GUI,
+         private: false,
+         toml_path: "host.ai.next_command",
+-        description: "Suggest the next command with the fast model after a command finishes. Sends recent commands and their output, so it only runs while private routing is on.",
++        description: "Also suggest the next command after commands that succeed (after a failed command the fast model always suggests a fix). Sends recent commands and their output, so it only runs while private routing is on.",
+     },
+     prompt_suggestions: HostAiPromptSuggestions {
+         type: bool,
+diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
+index fa6b10d..a68de55 100644
+--- a/app/src/settings_view/warp_agent_page.rs
++++ b/app/src/settings_view/warp_agent_page.rs
+@@ -7544,7 +7544,7 @@ impl SettingsWidget for HostAiNextCommandWidget {
+         let settings = HostAiSettings::as_ref(app);
+         let private_routing = *settings.private_routing;
+         let toggle = render_ai_setting_toggle::<HostAiNextCommand>(
+-            "Next Command",
++            "Next Command after every command",
+             WarpAgentPageAction::ToggleHostAiNextCommand,
+             *settings.next_command && private_routing,
+             private_routing,
+@@ -7553,8 +7553,9 @@ impl SettingsWidget for HostAiNextCommandWidget {
+             app,
+         );
+         let description = if private_routing {
+-            "When a command finishes, the fast model suggests the next one as a grey \
+-             autosuggestion (accept with \u{2192}). Sends recent commands and the last output."
++            "After a failed command, the fast model always suggests a fix as a grey \
++             autosuggestion (accept with Tab or \u{2192}). Turn this on to also get the next \
++             command after commands that succeed. Sends recent commands and the last output."
+         } else {
+             "Only available with private routing on, since it sends command output."
+         };

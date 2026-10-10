@@ -1,0 +1,61 @@
+From 308a024950323bf17833643e0c7b2748d91afea0 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 22:00:16 -0700
+Subject: [PATCH 27/49] Show agent conversation summaries as lines with bullet
+ points
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/workspace/view/agent_conversations.rs | 38 +++++++++++++++----
+ 1 file changed, 31 insertions(+), 7 deletions(-)
+
+diff --git a/app/src/workspace/view/agent_conversations.rs b/app/src/workspace/view/agent_conversations.rs
+index cec0ed8..2868946 100644
+--- a/app/src/workspace/view/agent_conversations.rs
++++ b/app/src/workspace/view/agent_conversations.rs
+@@ -288,14 +288,38 @@ fn render_summary_popover(summary: &Summary, appearance: &Appearance) -> Box<dyn
+             theme.main_text_color(theme.background()),
+         ),
+     };
+-    Container::new(
+-        ConstrainedBox::new(
+-            Text::new(text, appearance.ui_font_family(), appearance.ui_font_size())
+-                .with_color(color.into())
+-                .finish(),
++    // The summary is a sentence or two followed by "- " bullet points; give each its own line
++    // and the bullets a hanging "•".
++    let line = |text: &str| {
++        Text::new(
++            text.to_owned(),
++            appearance.ui_font_family(),
++            appearance.ui_font_size(),
+         )
+-        .with_max_width(SUMMARY_MAX_WIDTH)
+-        .finish(),
++        .with_color(color.into())
++        .finish()
++    };
++    let mut lines = Flex::column()
++        .with_cross_axis_alignment(CrossAxisAlignment::Start)
++        .with_spacing(4.);
++    for text in text.lines().map(str::trim).filter(|text| !text.is_empty()) {
++        let bullet = ["- ", "* ", "• "]
++            .iter()
++            .find_map(|marker| text.strip_prefix(marker));
++        lines.add_child(match bullet {
++            Some(item) => Flex::row()
++                .with_cross_axis_alignment(CrossAxisAlignment::Start)
++                .with_spacing(6.)
++                .with_child(line("•"))
++                .with_child(Shrinkable::new(1.0, line(item.trim_start())).finish())
++                .finish(),
++            None => line(text),
++        });
++    }
++    Container::new(
++        ConstrainedBox::new(lines.finish())
++            .with_max_width(SUMMARY_MAX_WIDTH)
++            .finish(),
+     )
+     .with_uniform_padding(10.)
+     .with_background(theme.surface_2())

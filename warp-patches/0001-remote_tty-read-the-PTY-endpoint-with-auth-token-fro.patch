@@ -1,0 +1,66 @@
+From 34c215eaf8db0e13df38ce28e077d497745390cf Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 13:33:29 -0700
+Subject: [PATCH 01/49] remote_tty: read the PTY endpoint (with auth token)
+ from the page fragment
+
+Embedders pass #pty_url=ws://127.0.0.1:PORT/create?token=... so the PTY backend can use a random
+port and require a secret; the fragment never reaches the server.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Cargo.toml                                |  1 +
+ app/src/terminal/remote_tty/event_loop.rs | 21 ++++++++++++++++++++-
+ 2 files changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index efb42a4..cba3c17 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -363,6 +363,7 @@ web-sys = { version = "0.3.69", features = [
+   "HtmlCanvasElement",
+   "HtmlInputElement",
+   "InputEvent",
++  "Location",
+   "Navigator",
+   "MediaQueryList",
+   "Window",
+diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
+index be3f792..9a3f1be 100644
+--- a/app/src/terminal/remote_tty/event_loop.rs
++++ b/app/src/terminal/remote_tty/event_loop.rs
+@@ -19,6 +19,23 @@ use crate::terminal::{SizeInfo, TerminalModel};
+ 
+ const CREATE_SESSION_ENDPOINT: &str = "ws://127.0.0.1:3030/create";
+ 
++/// Prefix of the page URL fragment that overrides [`CREATE_SESSION_ENDPOINT`], e.g.
++/// `#pty_url=ws://127.0.0.1:PORT/create?token=SECRET`. A fragment is never sent over the network,
++/// so embedders can hand the authenticated endpoint to the page without exposing the token.
++#[cfg(target_family = "wasm")]
++const PTY_URL_FRAGMENT_PREFIX: &str = "#pty_url=";
++
++fn create_session_endpoint() -> String {
++    #[cfg(target_family = "wasm")]
++    if let Some(url) = web_sys::window()
++        .and_then(|window| window.location().hash().ok())
++        .and_then(|hash| hash.strip_prefix(PTY_URL_FRAGMENT_PREFIX).map(str::to_owned))
++    {
++        return url;
++    }
++    CREATE_SESSION_ENDPOINT.to_owned()
++}
++
+ /// Contains info needed to resize the SSH terminal session. Is serialized and
+ /// sent over the websocket as text.
+ ///
+@@ -76,7 +93,9 @@ impl EventLoop {
+         let num_rows = size_info.rows;
+         let num_cols = size_info.columns;
+ 
+-        format!("{CREATE_SESSION_ENDPOINT}?num_rows={num_rows}&num_cols={num_cols}")
++        let endpoint = create_session_endpoint();
++        let separator = if endpoint.contains('?') { '&' } else { '?' };
++        format!("{endpoint}{separator}num_rows={num_rows}&num_cols={num_cols}")
+     }
+ 
+     /// Starts tasks to listen to and write to the websocket.

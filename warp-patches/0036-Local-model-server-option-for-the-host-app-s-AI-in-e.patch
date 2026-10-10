@@ -1,0 +1,170 @@
+From 2cf0442c4621586f79cb9c39887f895aa0c879fc Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 02:46:18 -0700
+Subject: [PATCH 36/49] Local model server option for the host app's AI in
+ embedded builds
+
+Adds `host.ai.local_model` (empty by default) and `host.ai.local_server` (LM Studio's
+http://127.0.0.1:1234/v1) with rows under AI provider. With a local model set, the host app sends
+#, Next Command and Prompt Suggestions to that OpenAI-compatible server instead of OpenRouter,
+so terminal context stays on the machine.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/settings/host_ai.rs              | 20 +++++
+ app/src/settings_view/warp_agent_page.rs | 97 ++++++++++++++++++++++++
+ 2 files changed, 117 insertions(+)
+
+diff --git a/app/src/settings/host_ai.rs b/app/src/settings/host_ai.rs
+index da8c1dd..8489d3b 100644
+--- a/app/src/settings/host_ai.rs
++++ b/app/src/settings/host_ai.rs
+@@ -142,6 +142,26 @@ define_settings_group!(HostAiSettings, settings: [
+         toml_path: "host.ai.prompt_suggestions_agent",
+         description: "Command that starts the CLI coding agent for an accepted prompt suggestion; the prompt is added as its last argument (e.g. \"claude\", \"codex\", \"gemini -i\").",
+     },
++    local_model: HostAiLocalModel {
++        type: String,
++        default: String::new(),
++        supported_platforms: SupportedPlatforms::ALL,
++        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
++        surface: settings::SettingSurfaces::GUI,
++        private: false,
++        toml_path: "host.ai.local_model",
++        description: "Model id on a local OpenAI-compatible server such as LM Studio. When set, every AI request goes to that server instead of OpenRouter, so terminal context stays on this machine.",
++    },
++    local_server: HostAiLocalServer {
++        type: String,
++        default: "http://127.0.0.1:1234/v1".to_owned(),
++        supported_platforms: SupportedPlatforms::ALL,
++        sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
++        surface: settings::SettingSurfaces::GUI,
++        private: false,
++        toml_path: "host.ai.local_server",
++        description: "Base URL of the local model server's OpenAI-compatible API (LM Studio's default is http://127.0.0.1:1234/v1).",
++    },
+     history_sync: HostHistorySync {
+         type: bool,
+         default: false,
+diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
+index cf65a5a..fa6b10d 100644
+--- a/app/src/settings_view/warp_agent_page.rs
++++ b/app/src/settings_view/warp_agent_page.rs
+@@ -2310,6 +2310,8 @@ impl WarpAgentPageView {
+         let host_expanded_effort_widget = HostAiEffortWidget::new(ctx);
+         let host_recent_commands_widget = HostAiRecentCommandsWidget::new(ctx);
+         let host_prompt_suggestions_agent_widget = HostAiPromptSuggestionsAgentWidget::new(ctx);
++        let host_local_model_widget = HostAiLocalWidget::new(HostAiLocalKind::Model, ctx);
++        let host_local_server_widget = HostAiLocalWidget::new(HostAiLocalKind::Server, ctx);
+ 
+         // Embedded (`remote_tty`) builds have no Warp account or Warp AI: one plain "AI" page
+         // with the host's provider, `#`, planned suggestions and the CLI agent toolbar.
+@@ -2327,6 +2329,8 @@ impl WarpAgentPageView {
+                         Box::new(host_expanded_effort_widget),
+                         Box::new(HostAiPrivateRoutingWidget::default()),
+                         Box::new(host_recent_commands_widget),
++                        Box::new(host_local_model_widget),
++                        Box::new(host_local_server_widget),
+                     ],
+                 ),
+                 Category::new(
+@@ -7613,6 +7617,99 @@ impl SettingsWidget for HostAiPromptSuggestionsWidget {
+     }
+ }
+ 
++#[derive(Clone, Copy)]
++enum HostAiLocalKind {
++    Model,
++    Server,
++}
++
++const HOST_AI_LOCAL_SERVER_DEFAULT: &str = "http://127.0.0.1:1234/v1";
++
++/// A local OpenAI-compatible model server (LM Studio etc.) instead of OpenRouter.
++struct HostAiLocalWidget {
++    kind: HostAiLocalKind,
++    editor: ViewHandle<EditorView>,
++}
++
++impl HostAiLocalWidget {
++    fn new(kind: HostAiLocalKind, ctx: &mut ViewContext<WarpAgentPageView>) -> Self {
++        let settings = HostAiSettings::as_ref(ctx);
++        let (text, placeholder) = match kind {
++            HostAiLocalKind::Model => (settings.local_model.clone(), "none (use OpenRouter)"),
++            HostAiLocalKind::Server => {
++                (settings.local_server.clone(), HOST_AI_LOCAL_SERVER_DEFAULT)
++            }
++        };
++        let editor = host_settings_editor(&text, placeholder, ctx);
++        ctx.subscribe_to_view(&editor, move |_, editor, event, ctx| {
++            if !matches!(event, EditorEvent::Blurred | EditorEvent::Enter) {
++                return;
++            }
++            let mut value = editor.as_ref(ctx).buffer_text(ctx).trim().to_owned();
++            if matches!(kind, HostAiLocalKind::Server)
++                && !(value.starts_with("http://") || value.starts_with("https://"))
++            {
++                value = HOST_AI_LOCAL_SERVER_DEFAULT.to_owned();
++                editor.update(ctx, |editor, ctx| editor.set_buffer_text(&value, ctx));
++            }
++            HostAiSettings::handle(ctx).update(ctx, |settings, ctx| match kind {
++                HostAiLocalKind::Model => {
++                    report_if_error!(settings.local_model.set_value(value, ctx))
++                }
++                HostAiLocalKind::Server => {
++                    report_if_error!(settings.local_server.set_value(value, ctx))
++                }
++            });
++            ctx.notify();
++        });
++        Self { kind, editor }
++    }
++}
++
++impl SettingsWidget for HostAiLocalWidget {
++    type View = WarpAgentPageView;
++
++    fn search_terms(&self) -> &str {
++        match self.kind {
++            HostAiLocalKind::Model => "ai provider local model lm studio ollama offline privacy",
++            HostAiLocalKind::Server => "ai provider local model server url lm studio ollama",
++        }
++    }
++
++    fn should_render(&self, app: &AppContext) -> bool {
++        match self.kind {
++            HostAiLocalKind::Model => true,
++            HostAiLocalKind::Server => !HostAiSettings::as_ref(app).local_model.is_empty(),
++        }
++    }
++
++    fn render(&self, _view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++        let (label, description) = match self.kind {
++            HostAiLocalKind::Model => (
++                "Local model",
++                "Model id on a local server such as LM Studio (e.g. qwen/qwen3.8-27b). When set, \
++                 #, Next Command and Prompt Suggestions use it instead of OpenRouter, in one \
++                 stage, and nothing leaves this machine. Empty: OpenRouter.",
++            ),
++            HostAiLocalKind::Server => (
++                "Local server",
++                "The server's OpenAI-compatible API (LM Studio: http://127.0.0.1:1234/v1).",
++            ),
++        };
++        let input = appearance
++            .ui_builder()
++            .text_input(self.editor.clone())
++            .with_style(UiComponentStyles {
++                padding: Some(Coords { top: 10., bottom: 10., left: 16., right: 16. }),
++                background: Some(appearance.theme().surface_2().into()),
++                ..Default::default()
++            })
++            .build()
++            .finish();
++        render_host_setting_column(label, description, input, appearance, app)
++    }
++}
++
+ /// The command that starts the CLI coding agent for accepted prompt suggestions.
+ struct HostAiPromptSuggestionsAgentWidget {
+     editor: ViewHandle<EditorView>,

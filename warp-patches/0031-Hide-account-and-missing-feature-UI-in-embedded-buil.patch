@@ -1,0 +1,216 @@
+From 7a26a4e67f9dee399c963b94d1cd9d6890218f67 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 01:50:38 -0700
+Subject: [PATCH 31/49] Hide account and missing-feature UI in embedded builds
+
+The user menu ends after "Join our Slack community" (no Sign up, Upgrade, Invite a friend, Log
+out, What's new). "Keyboard shortcuts" and Cmd+/ open the settings page instead of the resource
+center side pane, which embedded builds don't show. The Keyboard shortcuts page and the command
+palette leave out bindings of features embedded builds don't have: Warp's agent and Warp AI,
+cloud agents, Warp Drive objects, sharing, teams, accounts, updates, slash commands and left
+panel views other than Agents.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/search/action/data_source.rs |  3 +-
+ app/src/settings_view/keybindings.rs |  7 ++-
+ app/src/util/bindings.rs             | 75 ++++++++++++++++++++++++++++
+ app/src/workspace/view.rs            | 27 +++++++---
+ 4 files changed, 103 insertions(+), 9 deletions(-)
+
+diff --git a/app/src/search/action/data_source.rs b/app/src/search/action/data_source.rs
+index 6c97097..c49c631 100644
+--- a/app/src/search/action/data_source.rs
++++ b/app/src/search/action/data_source.rs
+@@ -10,7 +10,7 @@ use crate::search::binding_source::BindingSource;
+ use crate::search::command_palette::mixer::CommandPaletteItemAction;
+ use crate::search::data_source::{DataSourceSearchError, Query, QueryResult};
+ use crate::search::mixer::{DataSourceRunErrorWrapper, SyncDataSource};
+-use crate::util::bindings::CommandBinding;
++use crate::util::bindings::{CommandBinding, is_binding_hidden};
+ 
+ /// Data source for [`CommandBinding`]s. Produces a list of in-app actions a user can currently
+ /// perform.
+@@ -83,6 +83,7 @@ impl CommandBindingDataSource {
+             .into_iter()
+             .filter_map(|lens| CommandBinding::from_lens(lens, ctx))
+             .filter(|binding| binding_filter_fn.as_ref().is_none_or(|f| f(binding)))
++            .filter(|binding| !is_binding_hidden(&binding.name))
+             .map(Arc::new)
+             .map(|binding| (binding.id, binding))
+             .collect();
+diff --git a/app/src/settings_view/keybindings.rs b/app/src/settings_view/keybindings.rs
+index 971a9ac..b71e5d0 100644
+--- a/app/src/settings_view/keybindings.rs
++++ b/app/src/settings_view/keybindings.rs
+@@ -32,8 +32,8 @@ use crate::keyboard::{UserDefinedKeybinding, write_custom_keybinding};
+ use crate::search_bar::SearchBar;
+ use crate::settings::CloudPreferencesSettings;
+ use crate::util::bindings::{
+-    CommandBinding, filter_bindings_including_keystroke, reset_keybinding_to_default,
+-    set_custom_keybinding,
++    CommandBinding, filter_bindings_including_keystroke, is_binding_hidden,
++    reset_keybinding_to_default, set_custom_keybinding,
+ };
+ use crate::{TelemetryEvent, send_telemetry_from_ctx, themes};
+ 
+@@ -757,6 +757,7 @@ impl SettingsPageMeta for KeybindingsView {
+             lenses
+                 .into_iter()
+                 .map(|lens| CommandBinding::from_editable_lens(lens, ctx))
++                .filter(|binding| !is_binding_hidden(&binding.name))
+                 .sorted_by(|a, b| {
+                     // Sort by description then name so that we can deduplicate bindings by name.
+                     a.description
+@@ -985,7 +986,9 @@ impl KeybindingsWidget {
+             appearance,
+         ));
+ 
++        // Embedded builds have no keybindings side pane (the shortcut opens this page).
+         if let Some(keystroke) = bindings
++            .filter(|_| !cfg!(feature = "remote_tty"))
+             .and_then(|bindings| {
+                 bindings
+                     .iter()
+diff --git a/app/src/util/bindings.rs b/app/src/util/bindings.rs
+index 3ec0414..15ef3d0 100644
+--- a/app/src/util/bindings.rs
++++ b/app/src/util/bindings.rs
+@@ -627,6 +627,81 @@ fn convert_search_term_to_keystroke(search_term: &str) -> Option<Keystroke> {
+     Some(search_keystroke)
+ }
+ 
++/// Bindings of features that embedded (`remote_tty`) builds don't have: Warp's agent and Warp AI,
++/// cloud agents, Warp Drive objects, sharing, teams, accounts and updates, and left panel views
++/// other than the Agents panel. Hidden from the Keyboard shortcuts page and the command palette.
++const HIDDEN_IN_EMBEDDED_BINDINGS: &[&str] = &[
++    "ai_assistant_panel:focus_terminal_input",
++    "ai_assistant_panel:reset_context",
++    "input:clear_and_reset_ai_context_menu_query",
++    "input:set_mode_agent",
++    "input:start_new_agent_conversation",
++    "pane:share_pane_contents",
++    "terminal:accept_prompt_suggestions",
++    "terminal:ask_ai_assistant",
++    "terminal:ask_ai_assistant_last_block",
++    "terminal:attach_file",
++    "terminal:cycle_next_orchestration_child_agent",
++    "terminal:cycle_previous_orchestration_child_agent",
++    "terminal:jump_to_latest_agent_message",
++    "terminal:load_agent_mode_conversation",
++    "terminal:open_cli_agent_rich_input",
++    "terminal:open_share_block_modal",
++    "terminal:share_current_session",
++    "terminal:stop_sharing_current_session",
++    "terminal:toggle_conversation_details_panel",
++    "terminal:toggle_queue_next_prompt",
++    "terminal:toggle_teams_modal",
++    "workspace:check_for_updates",
++    "workspace:create_personal_ai_prompt",
++    "workspace:create_personal_env_vars",
++    "workspace:create_personal_folder",
++    "workspace:create_personal_notebook",
++    "workspace:create_personal_workflow",
++    "workspace:create_team_ai_prompt",
++    "workspace:create_team_env_vars",
++    "workspace:create_team_folder",
++    "workspace:create_team_notebook",
++    "workspace:create_team_workflow",
++    "workspace:edit_prompt",
++    "workspace:export_all_warp_drive_objects",
++    "workspace:import_to_personal_drive",
++    "workspace:import_to_team_drive",
++    "workspace:init_project_rules",
++    "workspace:jump_to_latest_toast",
++    "workspace:left_panel_global_search",
++    "workspace:left_panel_project_explorer",
++    "workspace:left_panel_warp_drive",
++    "workspace:log_out",
++    "workspace:new_agent_tab",
++    "workspace:new_ambient_agent_tab",
++    "workspace:open_ai_fact_collection",
++    "workspace:open_global_search",
++    "workspace:open_mcp_servers",
++    "workspace:search_drive",
++    "workspace:show_mcp_servers_settings_page",
++    "workspace:show_settings_billing_and_usage_page",
++    "workspace:show_settings_referrals_page",
++    "workspace:show_settings_shared_blocks_page",
++    "workspace:show_settings_teams_page",
++    "workspace:toggle_agent_management_view",
++    "workspace:toggle_ai_assistant",
++    "workspace:toggle_conversation_list_view",
++    "workspace:toggle_project_explorer",
++    "workspace:toggle_warp_drive",
++    "workspace:trigger_auto_handoff_to_cloud",
++    "workspace:update_and_relaunch",
++    "workspace:view_changelog",
++];
++
++/// Whether a binding belongs to a feature this build doesn't have (see
++/// [`HIDDEN_IN_EMBEDDED_BINDINGS`]; slash commands, named after their command like "/agent", are
++/// off in embedded builds too). Always false outside embedded builds.
++pub fn is_binding_hidden(name: &str) -> bool {
++    cfg!(feature = "remote_tty")
++        && (name.starts_with('/') || HIDDEN_IN_EMBEDDED_BINDINGS.contains(&name))
++}
++
+ pub fn filter_bindings_including_keystroke<'a>(
+     bindings_iter: impl Iterator<Item = &'a CommandBinding>,
+     search_term: &str,
+diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
+index 5470663..67c138e 100644
+--- a/app/src/workspace/view.rs
++++ b/app/src/workspace/view.rs
+@@ -10065,10 +10065,15 @@ impl Workspace {
+             }
+         }
+ 
++        // Embedded builds have no changelog (see `FeatureFlag::Changelog`).
++        if !cfg!(feature = "remote_tty") {
++            items.push(
++                MenuItemFields::new("What's new")
++                    .with_on_select_action(WorkspaceAction::ViewLatestChangelog)
++                    .into_item(),
++            );
++        }
+         items.extend([
+-            MenuItemFields::new("What's new")
+-                .with_on_select_action(WorkspaceAction::ViewLatestChangelog)
+-                .into_item(),
+             MenuItemFields::new("Settings")
+                 .with_on_select_action(WorkspaceAction::ShowSettings)
+                 .into_item(),
+@@ -10091,12 +10096,17 @@ impl Workspace {
+                 .into_item(),
+         );
+ 
+-        items.extend([
++        items.push(
+             MenuItemFields::new("Join our Slack community")
+                 .with_on_select_action(WorkspaceAction::JoinSlack)
+                 .into_item(),
+-            MenuItem::Separator,
+-        ]);
++        );
++
++        // Embedded builds have no Warp account, so no sign-up, plans, referrals or log out.
++        if cfg!(feature = "remote_tty") {
++            return items;
++        }
++        items.push(MenuItem::Separator);
+ 
+         if self.auth_state.is_anonymous_or_logged_out() {
+             items.push(
+@@ -10181,6 +10191,11 @@ impl Workspace {
+     }
+ 
+     pub fn toggle_keybindings_page(&mut self, ctx: &mut ViewContext<Self>) {
++        // Embedded builds don't show the resource center side panel, so use the settings page.
++        if cfg!(feature = "remote_tty") {
++            self.show_settings_with_section(Some(SettingsSection::Keybindings), ctx);
++            return;
++        }
+         let current_page = self
+             .resource_center_view
+             .read(ctx, |resource_center_view, _ctx| {

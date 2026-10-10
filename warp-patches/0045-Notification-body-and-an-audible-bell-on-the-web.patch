@@ -1,0 +1,147 @@
+From b5c5245985bdea88136acdea62e14aeeb039a9f2 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Thu, 8 Oct 2026 15:43:15 -0700
+Subject: [PATCH 45/49] Notification body and an audible bell on the web
+
+Web notifications now carry their body and respect play_sound, and the audible bell
+asks the host page to play it (window.warpPanelBell), so the setting is offered on
+the web too.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Cargo.toml                                       |  1 +
+ app/src/platform/wasm.rs                         |  9 +++++++++
+ app/src/terminal/audible_bell/mod.rs             |  3 +--
+ app/src/terminal/audible_bell/noop.rs            | 12 ------------
+ app/src/terminal/audible_bell/web.rs             | 16 ++++++++++++++++
+ app/src/terminal/settings.rs                     |  2 +-
+ .../src/windowing/winit/notifications/wasm.rs    |  8 +++++++-
+ 7 files changed, 35 insertions(+), 16 deletions(-)
+ delete mode 100644 app/src/terminal/audible_bell/noop.rs
+ create mode 100644 app/src/terminal/audible_bell/web.rs
+
+diff --git a/Cargo.toml b/Cargo.toml
+index 3c08264..fbd2b10 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -368,6 +368,7 @@ web-sys = { version = "0.3.69", features = [
+   "MediaQueryList",
+   "Window",
+   "Notification",
++  "NotificationOptions",
+   "NotificationPermission",
+ ] }
+ # Disable default features to disable support for WebGPU, which does not yet
+diff --git a/app/src/platform/wasm.rs b/app/src/platform/wasm.rs
+index d8371ac..3c6c1eb 100644
+--- a/app/src/platform/wasm.rs
++++ b/app/src/platform/wasm.rs
+@@ -83,6 +83,9 @@ mod ffi {
+ 
+         #[wasm_bindgen(js_name = "warpPanelRevealFile", catch)]
+         pub fn reveal_file(path: &str) -> Result<(), JsValue>;
++
++        #[wasm_bindgen(js_name = "warpPanelBell", catch)]
++        pub fn bell() -> Result<(), JsValue>;
+     }
+ }
+ 
+@@ -307,6 +310,12 @@ pub fn reveal_file_in_host(path: &str) -> bool {
+     ffi::reveal_file(path).is_ok()
+ }
+ 
++/// Plays the terminal bell through the host's `window.warpPanelBell()`.
++/// Returns false if the host doesn't provide it.
++pub fn ring_bell_in_host() -> bool {
++    ffi::bell().is_ok()
++}
++
+ /// Asks the embedding host app (e.g. the VS Code panel) to open its settings file, since the web
+ /// build keeps settings in localStorage rather than a file. Returns false if the host doesn't
+ /// provide `window.warpPanelOpenSettingsFile`.
+diff --git a/app/src/terminal/audible_bell/mod.rs b/app/src/terminal/audible_bell/mod.rs
+index 04a9507..77bc0af 100644
+--- a/app/src/terminal/audible_bell/mod.rs
++++ b/app/src/terminal/audible_bell/mod.rs
+@@ -6,8 +6,7 @@ use warpui::{Entity, SingletonEntity};
+ #[cfg_attr(any(target_os = "linux", target_os = "freebsd"), path = "linux.rs")]
+ #[cfg_attr(target_os = "macos", path = "macos.rs")]
+ #[cfg_attr(target_os = "windows", path = "windows.rs")]
+-// TODO(WASM): Replace this with a functional implementation for the web.
+-#[cfg_attr(target_family = "wasm", path = "noop.rs")]
++#[cfg_attr(target_family = "wasm", path = "web.rs")]
+ mod imp;
+ 
+ /// A singleton model that provides a way convenient way to make a "beep" when rung (via a call to
+diff --git a/app/src/terminal/audible_bell/noop.rs b/app/src/terminal/audible_bell/noop.rs
+deleted file mode 100644
+index da86700..0000000
+--- a/app/src/terminal/audible_bell/noop.rs
++++ /dev/null
+@@ -1,12 +0,0 @@
+-//! Module containing a noop implementation of an audible bell.
+-pub(super) struct AudibleBell;
+-
+-impl AudibleBell {
+-    pub fn new() -> Self {
+-        Self
+-    }
+-
+-    pub fn ring(&self) -> anyhow::Result<()> {
+-        Ok(())
+-    }
+-}
+diff --git a/app/src/terminal/audible_bell/web.rs b/app/src/terminal/audible_bell/web.rs
+new file mode 100644
+index 0000000..5857147
+--- /dev/null
++++ b/app/src/terminal/audible_bell/web.rs
+@@ -0,0 +1,16 @@
++//! Module containing a web implementation of an audible bell, played by the embedding host page.
++pub(super) struct AudibleBell;
++
++impl AudibleBell {
++    pub fn new() -> Self {
++        Self
++    }
++
++    pub fn ring(&self) -> anyhow::Result<()> {
++        if crate::platform::wasm::ring_bell_in_host() {
++            Ok(())
++        } else {
++            Err(anyhow::anyhow!("the host page doesn't provide a bell"))
++        }
++    }
++}
+diff --git a/app/src/terminal/settings.rs b/app/src/terminal/settings.rs
+index aadf28e..f028c7d 100644
+--- a/app/src/terminal/settings.rs
++++ b/app/src/terminal/settings.rs
+@@ -133,7 +133,7 @@ define_settings_group!(TerminalSettings, settings: [
+     use_audible_bell: UseAudibleBell {
+         type: bool,
+         default: false,
+-        supported_platforms: SupportedPlatforms::DESKTOP, /* Audible bell is not supported on web */
++        supported_platforms: SupportedPlatforms::ALL,
+         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+         surface: settings::SettingSurfaces::GUI,
+         private: false,
+diff --git a/crates/warpui/src/windowing/winit/notifications/wasm.rs b/crates/warpui/src/windowing/winit/notifications/wasm.rs
+index 6e8e2cc..5663cfb 100644
+--- a/crates/warpui/src/windowing/winit/notifications/wasm.rs
++++ b/crates/warpui/src/windowing/winit/notifications/wasm.rs
+@@ -24,7 +24,13 @@ pub async fn send_notification(
+     match web_sys::Notification::permission() {
+         web_sys::NotificationPermission::Granted => {
+             // If permissions are granted, send it! Constructing the Notification object is enough to launch it.
+-            let _ = web_sys::Notification::new(notification_content.title());
++            let options = web_sys::NotificationOptions::new();
++            options.set_body(notification_content.body());
++            options.set_silent(Some(!notification_content.play_sound()));
++            let _ = web_sys::Notification::new_with_options(
++                notification_content.title(),
++                &options,
++            );
+         }
+         web_sys::NotificationPermission::Default => {
+             let _ = proxy.send_event(CustomEvent::UpdateUIApp(Box::new(|ctx| {

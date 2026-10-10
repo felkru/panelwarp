@@ -1,0 +1,48 @@
+From 3acef418304ef21d208dcdcf0735229d668e5c47 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Wed, 7 Oct 2026 13:33:29 -0700
+Subject: [PATCH 04/49] embedded: memory stats off, vertical tabs on by default
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/settings/debug.rs         | 2 +-
+ app/src/workspace/tab_settings.rs | 6 ++++--
+ 2 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/app/src/settings/debug.rs b/app/src/settings/debug.rs
+index eb02fbd..cda5d2b 100644
+--- a/app/src/settings/debug.rs
++++ b/app/src/settings/debug.rs
+@@ -55,7 +55,7 @@ define_settings_group!(DebugSettings, settings: [
+     },
+     show_memory_stats: ShowMemoryStats {
+         type: bool,
+-        default: true,
++        default: false,
+         supported_platforms: SupportedPlatforms::ALL,
+         sync_to_cloud: SyncToCloud::Never,
+         surface: settings::SettingSurfaces::GUI,
+diff --git a/app/src/workspace/tab_settings.rs b/app/src/workspace/tab_settings.rs
+index 0e3aaa9..3255c0b 100644
+--- a/app/src/workspace/tab_settings.rs
++++ b/app/src/workspace/tab_settings.rs
+@@ -499,7 +499,8 @@ define_settings_group!(TabSettings, settings: [
+     },
+     use_vertical_tabs: UseVerticalTabs {
+         type: bool,
+-        default: false,
++        // On by default when embedded in a host app (e.g. the VS Code panel).
++        default: cfg!(feature = "remote_tty"),
+         supported_platforms: SupportedPlatforms::ALL,
+         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+         surface: settings::SettingSurfaces::GUI,
+@@ -509,7 +510,8 @@ define_settings_group!(TabSettings, settings: [
+     },
+     show_vertical_tab_panel_in_restored_windows: ShowVerticalTabPanelInRestoredWindows {
+         type: bool,
+-        default: false,
++        // On by default when embedded in a host app (e.g. the VS Code panel).
++        default: cfg!(feature = "remote_tty"),
+         supported_platforms: SupportedPlatforms::ALL,
+         sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+         surface: settings::SettingSurfaces::GUI,
