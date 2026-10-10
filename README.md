@@ -1,4 +1,4 @@
-# Warp for VS Code
+# Warp Terminal for VS Code
 
 **An unofficial fork of the open-source [Warp](https://github.com/warpdotdev/warp) terminal,
 running in a VS Code panel tab next to Terminal.** Not affiliated with or endorsed by Warp; all
@@ -28,6 +28,6 @@ container windows). Windows is planned.
 
 ## Source and license
 
-Warp for VS Code is licensed under the GNU AGPL v3, like Warp's client. The extension's source and the
+Warp Terminal for VS Code is licensed under the GNU AGPL v3, like Warp's client. The extension's source and the
 patches it applies to Warp are at <https://github.com/felkru/panelwarp>; `NOTICE.md` explains how
 to reproduce the bundled build.
