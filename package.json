@@ -1,8 +1,8 @@
 {
   "name": "panelwarp",
-  "displayName": "Panelwarp",
+  "displayName": "Warp for VS Code",
   "description": "An unofficial fork of the open-source Warp terminal, running in a VS Code panel tab next to Terminal: blocks, command search, completions and BYOK AI. Not affiliated with Warp.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "felixkrueckel",
   "icon": "media/icon.png",
   "repository": {
@@ -36,7 +36,7 @@
       "panel": [
         {
           "id": "warp",
-          "title": "Panelwarp",
+          "title": "Warp",
           "icon": "media/warp.svg"
         }
       ]
@@ -46,7 +46,7 @@
         {
           "type": "webview",
           "id": "warp.view",
-          "name": "Panelwarp"
+          "name": "Warp"
         }
       ]
     },
@@ -54,57 +54,57 @@
       {
         "command": "warp.commandPalette",
         "title": "Command Palette",
-        "category": "Panelwarp"
+        "category": "Warp"
       },
       {
         "command": "warp.newTab",
         "title": "New Tab",
-        "category": "Panelwarp"
+        "category": "Warp"
       },
       {
         "command": "warp.closeTab",
         "title": "Close Tab",
-        "category": "Panelwarp"
+        "category": "Warp"
       },
       {
         "command": "warp.nextTab",
         "title": "Next Tab",
-        "category": "Panelwarp"
+        "category": "Warp"
       },
       {
         "command": "warp.previousTab",
         "title": "Previous Tab",
-        "category": "Panelwarp"
+        "category": "Warp"
       },
       {
         "command": "warp.splitRight",
         "title": "Split Pane Right",
-        "category": "Panelwarp"
+        "category": "Warp"
       },
       {
         "command": "warp.splitDown",
         "title": "Split Pane Down",
-        "category": "Panelwarp"
+        "category": "Warp"
       },
       {
         "command": "warp.clearBlocks",
         "title": "Clear Blocks",
-        "category": "Panelwarp"
+        "category": "Warp"
       },
       {
         "command": "warp.restart",
         "title": "Restart Panel",
-        "category": "Panelwarp"
+        "category": "Warp"
       },
       {
         "command": "warp.setOpenRouterApiKey",
         "title": "Set OpenRouter API Key",
-        "category": "Panelwarp"
+        "category": "Warp"
       },
       {
         "command": "warp.benchmarkCommandSearch",
         "title": "Benchmark AI Command Search",
-        "category": "Panelwarp"
+        "category": "Warp"
       }
     ]
   },

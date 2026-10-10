@@ -161,7 +161,7 @@ class WarpViewProvider {
       this.view.webview.html = webviewHtml(server, keys);
     } catch (e) {
       this.log.appendLine(`failed to start: ${e.message}`);
-      this.view.webview.html = `<body style="font-family:sans-serif;padding:1em">Panelwarp: ${escapeHtml(e.message)}</body>`;
+      this.view.webview.html = `<body style="font-family:sans-serif;padding:1em">Warp for VS Code: ${escapeHtml(e.message)}</body>`;
     }
   }
 
@@ -482,7 +482,7 @@ function escapeHtml(s) {
 }
 
 function activate(context) {
-  const log = vscode.window.createOutputChannel('Panelwarp');
+  const log = vscode.window.createOutputChannel('Warp for VS Code');
   // Warp's settings mirror follows the user across machines via VS Code Settings Sync (the API
   // key stays per machine: SecretStorage doesn't sync).
   context.globalState.setKeysForSync([STORAGE_KEY, HISTORY_SYNC_KEY]);
