@@ -1,7 +1,7 @@
 From c2fd3b025974b86d88f37662ed778c72871b2d71 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 13:33:29 -0700
-Subject: [PATCH 05/50] embedded: host bridge for Open settings file and AI
+Subject: [PATCH 05/52] embedded: host bridge for Open settings file and AI
  command search (BYOK)
 
 Open settings file calls window.warpPanelOpenSettingsFile. AI command search (#) works without a

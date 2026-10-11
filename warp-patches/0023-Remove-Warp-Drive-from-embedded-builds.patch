@@ -1,7 +1,7 @@
 From b5896cca171338e99dfc9e55b429be5d1d2a7e4b Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 18:26:19 -0700
-Subject: [PATCH 23/50] Remove Warp Drive from embedded builds
+Subject: [PATCH 23/52] Remove Warp Drive from embedded builds
 
 Warp Drive needs a Warp account, which embedded (remote_tty) builds never
 have: it is now never available there, its keybindings and openers are

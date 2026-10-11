@@ -1,7 +1,7 @@
 From cad8cec011c35fd9ae7878eb2e4944fc8ec39448 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 02:40:58 -0700
-Subject: [PATCH 35/50] Local workflow files from the host app in embedded
+Subject: [PATCH 35/52] Local workflow files from the host app in embedded
  builds
 
 The web build has no file system, so the host app reads ~/.warp/workflows and the workspace's

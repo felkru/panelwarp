@@ -1,7 +1,7 @@
 From 3c21b17abdbaa6afcd7ee4f37197cd961bfa673d Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 17:41:24 -0700
-Subject: [PATCH 19/50] Turn off features whose settings are hidden in embedded
+Subject: [PATCH 19/52] Turn off features whose settings are hidden in embedded
  builds
 
 Under remote_tty: no Warp AI (is_any_ai_enabled), no autoupdate,

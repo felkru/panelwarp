@@ -1,0 +1,1340 @@
+From 36122f4c2264e868f3df36a1cac0bc41caf2fee4 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Sun, 11 Oct 2026 09:58:27 -0700
+Subject: [PATCH 51/52] Agent notifications and unread dots for CLI agents in
+ embedded builds
+
+The remote PTY's init line now sets what desktop's PTY environment does for CLI agent
+plugins (TERM_PROGRAM, WARP_CLIENT_VERSION, WARP_CLI_AGENT_PROTOCOL_VERSION), so Warp's
+Claude Code plugin sends structured status events: agents in panel tabs get the done /
+needs-input notifications and the unread dot in the vertical tabs, like desktop. The
+Agents panel shows the same dot on a conversation that runs in a Warp pane, and clicking
+it goes to that pane.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/platform/wasm.rs                      |   7 +-
+ app/src/search/command_palette/view.rs        |  53 ++---
+ app/src/server/server_api/ai.rs               |   8 +-
+ app/src/settings/mod.rs                       |   4 +-
+ app/src/settings/privacy.rs                   |   3 +-
+ app/src/settings_view/cli_agents_page.rs      | 132 +++++++------
+ app/src/settings_view/mod.rs                  |  13 +-
+ app/src/settings_view/settings_page.rs        |   6 +-
+ app/src/settings_view/warp_agent_page.rs      | 182 ++++++++++++++----
+ app/src/terminal/cli_agent_sessions/mod.rs    |   5 +
+ app/src/terminal/input.rs                     |   4 +-
+ app/src/terminal/remote_tty/event_loop.rs     |  61 +++++-
+ .../terminal/remote_tty/event_loop_tests.rs   |   5 +-
+ .../terminal/remote_tty/terminal_manager.rs   |  25 ++-
+ app/src/terminal/view/link_detection.rs       |  33 ++--
+ app/src/util/file.rs                          |   2 +-
+ app/src/voltron.rs                            |   6 +-
+ app/src/workspace/view.rs                     |   8 +
+ app/src/workspace/view/agent_conversations.rs |  93 ++++++++-
+ app/src/workspace/view/left_panel.rs          |   5 +
+ app/src/workspaces/user_workspaces/mod.rs     |   6 +-
+ 21 files changed, 461 insertions(+), 200 deletions(-)
+
+diff --git a/app/src/platform/wasm.rs b/app/src/platform/wasm.rs
+index 1fdd574..503c8a8 100644
+--- a/app/src/platform/wasm.rs
++++ b/app/src/platform/wasm.rs
+@@ -88,7 +88,8 @@ mod ffi {
+         pub fn resolve_paths(cwd: &str, candidates_json: &str) -> Result<js_sys::Promise, JsValue>;
+ 
+         #[wasm_bindgen(js_name = "warpPanelOpenFile", catch)]
+-        pub fn open_file(path: &str, line: Option<u32>, column: Option<u32>) -> Result<(), JsValue>;
++        pub fn open_file(path: &str, line: Option<u32>, column: Option<u32>)
++        -> Result<(), JsValue>;
+ 
+         #[wasm_bindgen(js_name = "warpPanelRevealFile", catch)]
+         pub fn reveal_file(path: &str) -> Result<(), JsValue>;
+@@ -514,8 +515,8 @@ pub mod host_session {
+ 
+     use crate::ai::blocklist::SerializedBlockListItem;
+     use crate::app_state::{
+-        AppState, BranchSnapshot, LeafContents, LeafSnapshot, PaneFlex, PaneNodeSnapshot,
+-        PaneUuid, SplitDirection, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
++        AppState, BranchSnapshot, LeafContents, LeafSnapshot, PaneFlex, PaneNodeSnapshot, PaneUuid,
++        SplitDirection, TabSnapshot, TerminalPaneSnapshot, WindowSnapshot,
+     };
+     use crate::tab::SelectedTabColor;
+     use crate::terminal::model::block::SerializedBlock;
+diff --git a/app/src/search/command_palette/view.rs b/app/src/search/command_palette/view.rs
+index 78b29e4..ac3602a 100644
+--- a/app/src/search/command_palette/view.rs
++++ b/app/src/search/command_palette/view.rs
+@@ -189,26 +189,26 @@ impl warpui::View for View {
+         // a fixed top offset pushes the palette out of view, so center it there instead.
+         let embedded = cfg!(feature = "remote_tty");
+         let palette_align = Align::new(
+-                Dismiss::new(
+-                    Container::new(
+-                        ConstrainedBox::new(palette.finish())
+-                            .with_width(styles::PALETTE_WIDTH)
+-                            .with_max_height(styles::PALETTE_HEIGHT)
+-                            .finish(),
+-                    )
+-                    .with_background(theme.surface_2())
+-                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
+-                    .with_border(Border::all(1.0).with_border_fill(theme.outline()))
+-                    .with_margin_top(if embedded { 12. } else { 117. })
+-                    .with_margin_bottom(if embedded { 12. } else { 0. })
+-                    .with_padding_bottom(10.)
+-                    .with_drop_shadow(*styles::DROP_SHADOW)
+-                    .finish(),
++            Dismiss::new(
++                Container::new(
++                    ConstrainedBox::new(palette.finish())
++                        .with_width(styles::PALETTE_WIDTH)
++                        .with_max_height(styles::PALETTE_HEIGHT)
++                        .finish(),
+                 )
+-                .on_dismiss(|ctx, _app| ctx.dispatch_typed_action(Action::Close))
+-                .prevent_interaction_with_other_elements()
++                .with_background(theme.surface_2())
++                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
++                .with_border(Border::all(1.0).with_border_fill(theme.outline()))
++                .with_margin_top(if embedded { 12. } else { 117. })
++                .with_margin_bottom(if embedded { 12. } else { 0. })
++                .with_padding_bottom(10.)
++                .with_drop_shadow(*styles::DROP_SHADOW)
+                 .finish(),
+-            );
++            )
++            .on_dismiss(|ctx, _app| ctx.dispatch_typed_action(Action::Close))
++            .prevent_interaction_with_other_elements()
++            .finish(),
++        );
+         let palette_align = if embedded {
+             palette_align
+         } else {
+@@ -216,13 +216,16 @@ impl warpui::View for View {
+         };
+ 
+         EventHandler::new(palette_align.finish())
+-        .on_modifier_state_changed(|ctx, _, key_code, state| {
+-            if matches!(key_code, KeyCode::ControlLeft | KeyCode::ControlRight) {
+-                ctx.dispatch_typed_action(Action::CtrlPressed(matches!(state, KeyState::Pressed)));
+-            }
+-            DispatchEventResult::StopPropagation
+-        })
+-        .finish()
++            .on_modifier_state_changed(|ctx, _, key_code, state| {
++                if matches!(key_code, KeyCode::ControlLeft | KeyCode::ControlRight) {
++                    ctx.dispatch_typed_action(Action::CtrlPressed(matches!(
++                        state,
++                        KeyState::Pressed
++                    )));
++                }
++                DispatchEventResult::StopPropagation
++            })
++            .finish()
+     }
+ 
+     fn on_focus(&mut self, focus_ctx: &FocusContext, ctx: &mut ViewContext<Self>) {
+diff --git a/app/src/server/server_api/ai.rs b/app/src/server/server_api/ai.rs
+index e1eee30..c511459 100644
+--- a/app/src/server/server_api/ai.rs
++++ b/app/src/server/server_api/ai.rs
+@@ -1940,8 +1940,12 @@ impl AIClient for ServerApi {
+     ) -> Result<Vec<AIGeneratedCommand>, GenerateCommandsFromNaturalLanguageError> {
+         // Embedded builds answer with the host app's own AI provider (bring-your-own-key).
+         #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
+-        return crate::platform::wasm::generate_commands_in_host(prompt, _ai_execution_context, "fast")
+-            .await;
++        return crate::platform::wasm::generate_commands_in_host(
++            prompt,
++            _ai_execution_context,
++            "fast",
++        )
++        .await;
+ 
+         #[allow(unreachable_code)]
+         let default_err = GenerateCommandsFromNaturalLanguageError::Other;
+diff --git a/app/src/settings/mod.rs b/app/src/settings/mod.rs
+index fb56919..d47ee05 100644
+--- a/app/src/settings/mod.rs
++++ b/app/src/settings/mod.rs
+@@ -12,8 +12,8 @@ mod debug;
+ mod editor;
+ mod emacs_bindings;
+ pub mod font;
+-mod host_ai;
+ mod gpu;
++mod host_ai;
+ pub mod import;
+ mod init;
+ pub mod initializer;
+@@ -57,8 +57,8 @@ pub use debug::*;
+ pub use editor::*;
+ pub use emacs_bindings::*;
+ pub use font::*;
+-pub use host_ai::*;
+ pub use gpu::*;
++pub use host_ai::*;
+ pub use init::*;
+ pub use input::*;
+ pub use input_mode::*;
+diff --git a/app/src/settings/privacy.rs b/app/src/settings/privacy.rs
+index e8a3fa6..59f9377 100644
+--- a/app/src/settings/privacy.rs
++++ b/app/src/settings/privacy.rs
+@@ -253,8 +253,7 @@ impl PrivacySettings {
+         // booleans.
+         let warp_drive_privacy = WarpDrivePrivacySettings::as_ref(ctx);
+         // Embedded (`remote_tty`) builds never send telemetry or crash reports.
+-        let is_telemetry_enabled =
+-            !EMBEDDED && *warp_drive_privacy.is_telemetry_enabled.value();
++        let is_telemetry_enabled = !EMBEDDED && *warp_drive_privacy.is_telemetry_enabled.value();
+         let is_crash_reporting_enabled =
+             !EMBEDDED && *warp_drive_privacy.is_crash_reporting_enabled.value();
+         let is_cloud_conversation_storage_enabled = *warp_drive_privacy
+diff --git a/app/src/settings_view/cli_agents_page.rs b/app/src/settings_view/cli_agents_page.rs
+index 82a3dba..e880746 100644
+--- a/app/src/settings_view/cli_agents_page.rs
++++ b/app/src/settings_view/cli_agents_page.rs
+@@ -137,7 +137,9 @@ impl<H: CliAgentsHost> CliAgentsState<H> {
+             .collect()
+     }
+ 
+-    fn create_cli_agent_dropdowns(ctx: &mut ViewContext<H>) -> Vec<ViewHandle<Dropdown<H::Action>>> {
++    fn create_cli_agent_dropdowns(
++        ctx: &mut ViewContext<H>,
++    ) -> Vec<ViewHandle<Dropdown<H::Action>>> {
+         let entries: Vec<(String, CLIAgent)> = AISettings::as_ref(ctx)
+             .cli_agent_footer_enabled_commands
+             .value()
+@@ -211,7 +213,6 @@ impl<H: CliAgentsHost> CliAgentsState<H> {
+     }
+ }
+ 
+-
+ pub struct CLIAgentsPageView {
+     page: PageType<Self>,
+     cli: CliAgentsState<Self>,
+@@ -311,70 +312,70 @@ pub(super) fn handle_cli_action<H: CliAgentsHost>(
+     action: &CLIAgentsPageAction,
+     ctx: &mut ViewContext<H>,
+ ) {
+-        match action {
+-            CLIAgentsPageAction::ToggleCLIAgentToolbar => {
+-                match AISettings::handle(ctx).update(ctx, |settings, ctx| {
+-                    settings
+-                        .should_render_cli_agent_footer
+-                        .toggle_and_save_value(ctx)
+-                }) {
+-                    Ok(new_value) => {
+-                        send_telemetry_from_ctx!(
+-                            TelemetryEvent::ToggleCLIAgentToolbarSetting {
+-                                is_enabled: new_value,
+-                            },
+-                            ctx
+-                        );
+-                    }
+-                    Err(e) => {
+-                        log::warn!("Failed to set value for CLI Agent Footer setting: {e:?}");
+-                    }
+-                }
+-                ctx.notify();
+-            }
+-            CLIAgentsPageAction::ToggleAutoToggleRichInput => {
+-                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+-                    report_if_error!(settings.auto_toggle_rich_input.toggle_and_save_value(ctx));
+-                });
+-                ctx.notify();
+-            }
+-            CLIAgentsPageAction::ToggleAutoOpenRichInputOnCLIAgentStart => {
+-                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+-                    report_if_error!(
+-                        settings
+-                            .auto_open_rich_input_on_cli_agent_start
+-                            .toggle_and_save_value(ctx)
+-                    );
+-                });
+-                ctx.notify();
+-            }
+-            CLIAgentsPageAction::ToggleAutoDismissRichInputAfterSubmit => {
+-                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+-                    report_if_error!(
+-                        settings
+-                            .auto_dismiss_rich_input_after_submit
+-                            .toggle_and_save_value(ctx)
++    match action {
++        CLIAgentsPageAction::ToggleCLIAgentToolbar => {
++            match AISettings::handle(ctx).update(ctx, |settings, ctx| {
++                settings
++                    .should_render_cli_agent_footer
++                    .toggle_and_save_value(ctx)
++            }) {
++                Ok(new_value) => {
++                    send_telemetry_from_ctx!(
++                        TelemetryEvent::ToggleCLIAgentToolbarSetting {
++                            is_enabled: new_value,
++                        },
++                        ctx
+                     );
+-                });
+-                ctx.notify();
+-            }
+-            CLIAgentsPageAction::ToggleSubmitRichInputOnCtrlEnter => {
+-                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+-                    report_if_error!(settings.submit_on_ctrl_enter.toggle_and_save_value(ctx));
+-                });
+-                ctx.notify();
+-            }
+-            CLIAgentsPageAction::RemoveCLIAgentToolbarEnabledCommand(command) => {
+-                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+-                    settings.remove_cli_agent_footer_enabled_command(command, ctx);
+-                });
+-            }
+-            CLIAgentsPageAction::SetCLIAgentForCommand { pattern, agent } => {
+-                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+-                    settings.set_cli_agent_for_command(pattern, *agent, ctx);
+-                });
++                }
++                Err(e) => {
++                    log::warn!("Failed to set value for CLI Agent Footer setting: {e:?}");
++                }
+             }
++            ctx.notify();
++        }
++        CLIAgentsPageAction::ToggleAutoToggleRichInput => {
++            AISettings::handle(ctx).update(ctx, |settings, ctx| {
++                report_if_error!(settings.auto_toggle_rich_input.toggle_and_save_value(ctx));
++            });
++            ctx.notify();
+         }
++        CLIAgentsPageAction::ToggleAutoOpenRichInputOnCLIAgentStart => {
++            AISettings::handle(ctx).update(ctx, |settings, ctx| {
++                report_if_error!(
++                    settings
++                        .auto_open_rich_input_on_cli_agent_start
++                        .toggle_and_save_value(ctx)
++                );
++            });
++            ctx.notify();
++        }
++        CLIAgentsPageAction::ToggleAutoDismissRichInputAfterSubmit => {
++            AISettings::handle(ctx).update(ctx, |settings, ctx| {
++                report_if_error!(
++                    settings
++                        .auto_dismiss_rich_input_after_submit
++                        .toggle_and_save_value(ctx)
++                );
++            });
++            ctx.notify();
++        }
++        CLIAgentsPageAction::ToggleSubmitRichInputOnCtrlEnter => {
++            AISettings::handle(ctx).update(ctx, |settings, ctx| {
++                report_if_error!(settings.submit_on_ctrl_enter.toggle_and_save_value(ctx));
++            });
++            ctx.notify();
++        }
++        CLIAgentsPageAction::RemoveCLIAgentToolbarEnabledCommand(command) => {
++            AISettings::handle(ctx).update(ctx, |settings, ctx| {
++                settings.remove_cli_agent_footer_enabled_command(command, ctx);
++            });
++        }
++        CLIAgentsPageAction::SetCLIAgentForCommand { pattern, agent } => {
++            AISettings::handle(ctx).update(ctx, |settings, ctx| {
++                settings.set_cli_agent_for_command(pattern, *agent, ctx);
++            });
++        }
++    }
+ }
+ 
+ impl SettingsPageMeta for CLIAgentsPageView {
+@@ -896,6 +897,9 @@ impl<H: CliAgentsHost> SettingsWidget for CLIAgentToolbarLayoutWidget<H> {
+             return Empty::new().finish();
+         }
+ 
+-        render_toolbar_layout_editor(&view.cli_agents().cli_agent_toolbar_inline_editor, appearance)
++        render_toolbar_layout_editor(
++            &view.cli_agents().cli_agent_toolbar_inline_editor,
++            appearance,
++        )
+     }
+ }
+diff --git a/app/src/settings_view/mod.rs b/app/src/settings_view/mod.rs
+index 3b8e765..9030efa 100644
+--- a/app/src/settings_view/mod.rs
++++ b/app/src/settings_view/mod.rs
+@@ -1505,13 +1505,12 @@ impl SettingsView {
+             }
+             other => other.unwrap_or_default(),
+         };
+-        let initial_page = if cfg!(feature = "remote_tty")
+-            && !nav_items_contain(&nav_items, initial_page)
+-        {
+-            SettingsSection::WarpAgent
+-        } else {
+-            initial_page
+-        };
++        let initial_page =
++            if cfg!(feature = "remote_tty") && !nav_items_contain(&nav_items, initial_page) {
++                SettingsSection::WarpAgent
++            } else {
++                initial_page
++            };
+ 
+         // Auto-expand the umbrella if the initial page is one of its subpages.
+         for item in &mut nav_items {
+diff --git a/app/src/settings_view/settings_page.rs b/app/src/settings_view/settings_page.rs
+index 69e492a..50cca79 100644
+--- a/app/src/settings_view/settings_page.rs
++++ b/app/src/settings_view/settings_page.rs
+@@ -72,7 +72,11 @@ const ALTERNATING_LIST_ITEM_PADDING: f32 = 8.0;
+ const GREY_TEXT_OPACITY: u8 = 60;
+ /// Embedded builds live in a short, narrow VS Code panel: let the page shrink to the panel instead
+ /// of scrolling sideways.
+-const MIN_PAGE_WIDTH: f32 = if cfg!(feature = "remote_tty") { 300. } else { 520. };
++const MIN_PAGE_WIDTH: f32 = if cfg!(feature = "remote_tty") {
++    300.
++} else {
++    520.
++};
+ const MAX_PAGE_WIDTH: f32 = 800.;
+ const INFO_TOOLTIP_MAX_WIDTH: f32 = 320.;
+ 
+diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
+index a68de55..c126c6b 100644
+--- a/app/src/settings_view/warp_agent_page.rs
++++ b/app/src/settings_view/warp_agent_page.rs
+@@ -35,9 +35,10 @@ use warp_errors::report_if_error;
+ use warpui::r#async::Timer;
+ use warpui::elements::{
+     Border, ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
+-    Empty, Expanded, Fill, Flex, FormattedTextElement, HighlightedHyperlink, Hoverable, HyperlinkLens,
+-    HyperlinkUrl, MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning,
+-    ParentAnchor, ParentElement, ParentOffsetBounds, Radius, Shrinkable, Stack, Text,
++    Empty, Expanded, Fill, Flex, FormattedTextElement, HighlightedHyperlink, Hoverable,
++    HyperlinkLens, HyperlinkUrl, MainAxisAlignment, MainAxisSize, MouseStateHandle,
++    OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius, Shrinkable, Stack,
++    Text,
+ };
+ use warpui::fonts::{Properties, Weight};
+ use warpui::keymap::{ContextPredicate, Keystroke};
+@@ -54,8 +55,8 @@ use warpui::{
+ };
+ 
+ use super::ai_shared::{
+-    render_ai_feature_switch, render_ai_setting_description,
+-    render_ai_setting_label, render_ai_setting_toggle, render_toolbar_layout_editor, styles,
++    render_ai_feature_switch, render_ai_setting_description, render_ai_setting_label,
++    render_ai_setting_toggle, render_toolbar_layout_editor, styles,
+     update_editor_interaction_state,
+ };
+ use super::cli_agents_page::{
+@@ -100,15 +101,16 @@ use crate::server::telemetry::{
+     AgentModeAutoDetectionSettingOrigin, ToggleCodeSuggestionsSettingSource,
+ };
+ use crate::settings::{
+-    HOST_AI_EFFORT_CHOICES, HostAiExpandedEffort, HostAiPriority, HostAiPrivateRouting,
+-    HostAiNextCommand, HostAiPromptSuggestions, HostAiRecentCommandsInContext, HostAiSettings,
+     AIAutoDetectionEnabled, AICommandDenylist, AISettings, AISettingsChangedEvent,
+-    AgentModeQuerySuggestionsEnabled, AutoApproveBypassesCommandDenylist, AwsBedrockAutoLogin,
+-    AwsBedrockCredentialsEnabled, CanUseWarpCreditsForFallback, AiCommandSearchDebounceMs, EnableAiCommandSearchHashTrigger,
+-    GeminiEnterpriseCredentialsEnabled, GitOperationsAutogenEnabled, IncludeAgentCommandsInHistory,
+-    InputSettings, IntelligentAutosuggestionsEnabled, LongRunningCommandSubmissionMode,
+-    NLDInTerminalEnabled, NaturalLanguageAutosuggestionsEnabled, OrchestrationMessageDisplayMode,
+-    PromptSubmissionMode, SharedBlockTitleGenerationEnabled,
++    AgentModeQuerySuggestionsEnabled, AiCommandSearchDebounceMs,
++    AutoApproveBypassesCommandDenylist, AwsBedrockAutoLogin, AwsBedrockCredentialsEnabled,
++    CanUseWarpCreditsForFallback, EnableAiCommandSearchHashTrigger,
++    GeminiEnterpriseCredentialsEnabled, GitOperationsAutogenEnabled, HOST_AI_EFFORT_CHOICES,
++    HostAiExpandedEffort, HostAiNextCommand, HostAiPriority, HostAiPrivateRouting,
++    HostAiPromptSuggestions, HostAiRecentCommandsInContext, HostAiSettings,
++    IncludeAgentCommandsInHistory, InputSettings, IntelligentAutosuggestionsEnabled,
++    LongRunningCommandSubmissionMode, NLDInTerminalEnabled, NaturalLanguageAutosuggestionsEnabled,
++    OrchestrationMessageDisplayMode, PromptSubmissionMode, SharedBlockTitleGenerationEnabled,
+     ShouldRenderUseAgentToolbarForUserCommands, ShouldShowOzUpdatesInZeroState, ShowAgentTips,
+     ShowConversationHistory, ShowHintText, ThinkingDisplayMode, VOICE_INPUT_LANGUAGES,
+     VoiceInputEnabled, VoiceInputLanguage, VoiceInputToggleKey,
+@@ -2990,7 +2992,11 @@ impl TypedActionView for WarpAgentPageView {
+             }
+             WarpAgentPageAction::SetAiCommandSearchDebounceMs(ms) => {
+                 InputSettings::handle(ctx).update(ctx, |input_settings, ctx| {
+-                    report_if_error!(input_settings.ai_command_search_debounce_ms.set_value(*ms, ctx));
++                    report_if_error!(
++                        input_settings
++                            .ai_command_search_debounce_ms
++                            .set_value(*ms, ctx)
++                    );
+                 });
+             }
+             WarpAgentPageAction::SetHostAiExpandedEffort(effort) => {
+@@ -3002,7 +3008,9 @@ impl TypedActionView for WarpAgentPageView {
+                 // Recent commands can contain secrets; they're only sent with private routing.
+                 if *HostAiSettings::as_ref(ctx).private_routing {
+                     HostAiSettings::handle(ctx).update(ctx, |settings, ctx| {
+-                        report_if_error!(settings.recent_commands_in_context.set_value(*count, ctx));
++                        report_if_error!(
++                            settings.recent_commands_in_context.set_value(*count, ctx)
++                        );
+                     });
+                 }
+                 ctx.notify();
+@@ -7075,7 +7083,8 @@ impl HostApiKeyWidget {
+             let appearance = Appearance::handle(ctx).as_ref(ctx);
+             let options = SingleLineEditorOptions {
+                 is_password: true,
+-                propagate_and_no_op_vertical_navigation_keys: PropagateAndNoOpNavigationKeys::Always,
++                propagate_and_no_op_vertical_navigation_keys:
++                    PropagateAndNoOpNavigationKeys::Always,
+                 text: TextOptions {
+                     font_size_override: Some(appearance.ui_font_size()),
+                     font_family_override: Some(appearance.monospace_font_family()),
+@@ -7216,14 +7225,22 @@ fn render_host_setting_column(
+     let column = Flex::column()
+         .with_spacing(8.)
+         .with_child(
+-            Text::new_inline(label.to_owned(), appearance.ui_font_family(), CONTENT_FONT_SIZE)
+-                .with_color(styles::header_font_color(true, app).into())
+-                .finish(),
++            Text::new_inline(
++                label.to_owned(),
++                appearance.ui_font_family(),
++                CONTENT_FONT_SIZE,
++            )
++            .with_color(styles::header_font_color(true, app).into())
++            .finish(),
+         )
+         .with_child(
+-            Text::new(description.to_owned(), appearance.ui_font_family(), CONTENT_FONT_SIZE)
+-                .with_color(styles::description_font_color(true, app).into())
+-                .finish(),
++            Text::new(
++                description.to_owned(),
++                appearance.ui_font_family(),
++                CONTENT_FONT_SIZE,
++            )
++            .with_color(styles::description_font_color(true, app).into())
++            .finish(),
+         )
+         .with_child(control)
+         .finish();
+@@ -7247,7 +7264,10 @@ impl HostAiModelWidget {
+         let settings = HostAiSettings::as_ref(ctx);
+         let (text, placeholder) = match kind {
+             HostAiModelKind::Fast => (settings.fast_model.clone(), "deepseek/deepseek-v4.1-flash"),
+-            HostAiModelKind::Expanded => (settings.expanded_model.clone(), "none (fast suggestions only)"),
++            HostAiModelKind::Expanded => (
++                settings.expanded_model.clone(),
++                "none (fast suggestions only)",
++            ),
+         };
+         let editor = host_settings_editor(&text, placeholder, ctx);
+         ctx.subscribe_to_view(&editor, move |_, editor, event, ctx| {
+@@ -7260,7 +7280,9 @@ impl HostAiModelWidget {
+                 editor.update(ctx, |editor, ctx| editor.set_buffer_text(&model, ctx));
+             }
+             HostAiSettings::handle(ctx).update(ctx, |settings, ctx| match kind {
+-                HostAiModelKind::Fast => report_if_error!(settings.fast_model.set_value(model, ctx)),
++                HostAiModelKind::Fast => {
++                    report_if_error!(settings.fast_model.set_value(model, ctx))
++                }
+                 HostAiModelKind::Expanded => {
+                     report_if_error!(settings.expanded_model.set_value(model, ctx))
+                 }
+@@ -7282,7 +7304,12 @@ impl SettingsWidget for HostAiModelWidget {
+         }
+     }
+ 
+-    fn render(&self, _view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++    fn render(
++        &self,
++        _view: &Self::View,
++        appearance: &Appearance,
++        app: &AppContext,
++    ) -> Box<dyn Element> {
+         let (label, description) = match self.kind {
+             HostAiModelKind::Fast => (
+                 "Fast model",
+@@ -7298,7 +7325,12 @@ impl SettingsWidget for HostAiModelWidget {
+             .ui_builder()
+             .text_input(self.editor.clone())
+             .with_style(UiComponentStyles {
+-                padding: Some(Coords { top: 10., bottom: 10., left: 16., right: 16. }),
++                padding: Some(Coords {
++                    top: 10.,
++                    bottom: 10.,
++                    left: 16.,
++                    right: 16.,
++                }),
+                 background: Some(appearance.theme().surface_2().into()),
+                 ..Default::default()
+             })
+@@ -7352,10 +7384,16 @@ fn render_host_ai_priority_option(
+ ) -> Option<RenderableOptionConfig> {
+     let theme = Appearance::as_ref(app).theme();
+     let (label, tooltip) = match priority {
+-        HostAiPriority::Balanced => ("Balanced", "OpenRouter's default mix of price, speed and uptime."),
++        HostAiPriority::Balanced => (
++            "Balanced",
++            "OpenRouter's default mix of price, speed and uptime.",
++        ),
+         HostAiPriority::Latency => ("Latency", "Hosts that start answering soonest first."),
+         HostAiPriority::Price => ("Cost", "Cheapest hosts first."),
+-        HostAiPriority::Throughput => ("Throughput", "Hosts that generate the most tokens per second first."),
++        HostAiPriority::Throughput => (
++            "Throughput",
++            "Hosts that generate the most tokens per second first.",
++        ),
+     };
+     Some(RenderableOptionConfig {
+         icon_path: "",
+@@ -7376,7 +7414,11 @@ fn render_host_ai_priority_option(
+             background_color: theme.surface_3().into(),
+             border_color: theme.outline().into(),
+         }),
+-        background: if is_selected { Fill::Solid(theme.surface_3().into()) } else { Fill::None },
++        background: if is_selected {
++            Fill::Solid(theme.surface_3().into())
++        } else {
++            Fill::None
++        },
+     })
+ }
+ 
+@@ -7410,7 +7452,12 @@ impl SettingsWidget for HostAiPriorityWidget {
+         }
+     }
+ 
+-    fn render(&self, _view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++    fn render(
++        &self,
++        _view: &Self::View,
++        appearance: &Appearance,
++        app: &AppContext,
++    ) -> Box<dyn Element> {
+         let label = match self.kind {
+             HostAiModelKind::Fast => "Fast model priority",
+             HostAiModelKind::Expanded => "Expanded model priority",
+@@ -7454,7 +7501,8 @@ impl HostAiEffortWidget {
+                     .collect(),
+                 ctx,
+             );
+-            dropdown.set_selected_by_action(WarpAgentPageAction::SetHostAiExpandedEffort(current), ctx);
++            dropdown
++                .set_selected_by_action(WarpAgentPageAction::SetHostAiExpandedEffort(current), ctx);
+             dropdown
+         });
+         Self { dropdown }
+@@ -7468,7 +7516,12 @@ impl SettingsWidget for HostAiEffortWidget {
+         "ai provider openrouter expanded model reasoning effort thinking command search #"
+     }
+ 
+-    fn render(&self, view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++    fn render(
++        &self,
++        view: &Self::View,
++        appearance: &Appearance,
++        app: &AppContext,
++    ) -> Box<dyn Element> {
+         host_setting_row(render_dropdown_item(
+             appearance,
+             "Expanded model effort",
+@@ -7499,7 +7552,12 @@ impl SettingsWidget for HostAiPrivateRoutingWidget {
+         "ai provider openrouter private routing privacy zero data retention zdr training"
+     }
+ 
+-    fn render(&self, view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++    fn render(
++        &self,
++        view: &Self::View,
++        appearance: &Appearance,
++        app: &AppContext,
++    ) -> Box<dyn Element> {
+         let toggle = render_ai_setting_toggle::<HostAiPrivateRouting>(
+             "Private routing",
+             WarpAgentPageAction::ToggleHostAiPrivateRouting,
+@@ -7540,7 +7598,12 @@ impl SettingsWidget for HostAiNextCommandWidget {
+         "ai a.i. next command suggestions autosuggestions privacy"
+     }
+ 
+-    fn render(&self, view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++    fn render(
++        &self,
++        view: &Self::View,
++        appearance: &Appearance,
++        app: &AppContext,
++    ) -> Box<dyn Element> {
+         let settings = HostAiSettings::as_ref(app);
+         let private_routing = *settings.private_routing;
+         let toggle = render_ai_setting_toggle::<HostAiNextCommand>(
+@@ -7586,7 +7649,12 @@ impl SettingsWidget for HostAiPromptSuggestionsWidget {
+         "ai a.i. prompt suggestions cli coding agent claude code privacy"
+     }
+ 
+-    fn render(&self, view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++    fn render(
++        &self,
++        view: &Self::View,
++        appearance: &Appearance,
++        app: &AppContext,
++    ) -> Box<dyn Element> {
+         let settings = HostAiSettings::as_ref(app);
+         let private_routing = *settings.private_routing;
+         let toggle = render_ai_setting_toggle::<HostAiPromptSuggestions>(
+@@ -7684,7 +7752,12 @@ impl SettingsWidget for HostAiLocalWidget {
+         }
+     }
+ 
+-    fn render(&self, _view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++    fn render(
++        &self,
++        _view: &Self::View,
++        appearance: &Appearance,
++        app: &AppContext,
++    ) -> Box<dyn Element> {
+         let (label, description) = match self.kind {
+             HostAiLocalKind::Model => (
+                 "Local model",
+@@ -7701,7 +7774,12 @@ impl SettingsWidget for HostAiLocalWidget {
+             .ui_builder()
+             .text_input(self.editor.clone())
+             .with_style(UiComponentStyles {
+-                padding: Some(Coords { top: 10., bottom: 10., left: 16., right: 16. }),
++                padding: Some(Coords {
++                    top: 10.,
++                    bottom: 10.,
++                    left: 16.,
++                    right: 16.,
++                }),
+                 background: Some(appearance.theme().surface_2().into()),
+                 ..Default::default()
+             })
+@@ -7749,12 +7827,22 @@ impl SettingsWidget for HostAiPromptSuggestionsAgentWidget {
+         *settings.prompt_suggestions && *settings.private_routing
+     }
+ 
+-    fn render(&self, _view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++    fn render(
++        &self,
++        _view: &Self::View,
++        appearance: &Appearance,
++        app: &AppContext,
++    ) -> Box<dyn Element> {
+         let input = appearance
+             .ui_builder()
+             .text_input(self.editor.clone())
+             .with_style(UiComponentStyles {
+-                padding: Some(Coords { top: 10., bottom: 10., left: 16., right: 16. }),
++                padding: Some(Coords {
++                    top: 10.,
++                    bottom: 10.,
++                    left: 16.,
++                    right: 16.,
++                }),
+                 background: Some(appearance.theme().surface_2().into()),
+                 ..Default::default()
+             })
+@@ -7791,14 +7879,19 @@ impl HostAiRecentCommandsWidget {
+                     .into_iter()
+                     .map(|count| {
+                         DropdownItem::new(
+-                            if count == 0 { "None".to_owned() } else { count.to_string() },
++                            if count == 0 {
++                                "None".to_owned()
++                            } else {
++                                count.to_string()
++                            },
+                             WarpAgentPageAction::SetHostAiRecentCommands(count),
+                         )
+                     })
+                     .collect(),
+                 ctx,
+             );
+-            dropdown.set_selected_by_action(WarpAgentPageAction::SetHostAiRecentCommands(current), ctx);
++            dropdown
++                .set_selected_by_action(WarpAgentPageAction::SetHostAiRecentCommands(current), ctx);
+             dropdown
+         });
+         Self { dropdown }
+@@ -7812,7 +7905,12 @@ impl SettingsWidget for HostAiRecentCommandsWidget {
+         "ai provider recent commands history context command search # privacy"
+     }
+ 
+-    fn render(&self, view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
++    fn render(
++        &self,
++        view: &Self::View,
++        appearance: &Appearance,
++        app: &AppContext,
++    ) -> Box<dyn Element> {
+         let private_routing = *HostAiSettings::as_ref(app).private_routing;
+         host_setting_row(render_dropdown_item(
+             appearance,
+diff --git a/app/src/terminal/cli_agent_sessions/mod.rs b/app/src/terminal/cli_agent_sessions/mod.rs
+index 756da0a..7b44cf7 100644
+--- a/app/src/terminal/cli_agent_sessions/mod.rs
++++ b/app/src/terminal/cli_agent_sessions/mod.rs
+@@ -384,6 +384,11 @@ impl CLIAgentSessionsModel {
+         self.sessions.get(&terminal_view_id)
+     }
+ 
++    /// Every terminal view's CLI agent session.
++    pub fn sessions(&self) -> impl Iterator<Item = (EntityId, &CLIAgentSession)> {
++        self.sessions.iter().map(|(id, session)| (*id, session))
++    }
++
+     /// Returns `true` if the rich input editor is currently open for this terminal.
+     pub fn is_input_open(&self, terminal_view_id: EntityId) -> bool {
+         self.sessions
+diff --git a/app/src/terminal/input.rs b/app/src/terminal/input.rs
+index 1181c5a..67306fd 100644
+--- a/app/src/terminal/input.rs
++++ b/app/src/terminal/input.rs
+@@ -7502,7 +7502,8 @@ impl Input {
+ 
+         // Now handle the default (empty prefix) placeholder
+         if toggled_on && AISettings::as_ref(ctx).is_ai_command_search_enabled(ctx) {
+-            if FeatureFlag::AgentMode.is_enabled() && AISettings::as_ref(ctx).is_any_ai_enabled(ctx) {
++            if FeatureFlag::AgentMode.is_enabled() && AISettings::as_ref(ctx).is_any_ai_enabled(ctx)
++            {
+                 // agent_mode_hint_text now handles caching internally
+                 let hint_text = self.agent_mode_hint_text(ctx);
+                 self.editor.update(ctx, |editor, ctx| {
+@@ -12921,7 +12922,6 @@ impl Input {
+             futures::future::ready(None).boxed()
+         };
+ 
+-
+         let abort_handle = ctx
+             .spawn_abortable(
+                 async move {
+diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
+index 0622f21..28aa4e8 100644
+--- a/app/src/terminal/remote_tty/event_loop.rs
++++ b/app/src/terminal/remote_tty/event_loop.rs
+@@ -10,20 +10,25 @@ use futures_util::SinkExt;
+ use parking_lot::FairMutex;
+ use serde::{Deserialize, Serialize};
+ use settings::Setting as _;
++use warp_core::channel::ChannelState;
++use warp_core::cli_agent_protocol::{
++    CLI_AGENT_PROTOCOL_VERSION, WARP_CLI_AGENT_PROTOCOL_VERSION_ENV, WARP_CLIENT_VERSION_ENV,
++};
++use warp_core::features::FeatureFlag;
+ use warp_errors::report_error;
+ use warpui::r#async::Timer;
+ use warpui::{Entity, ModelContext, SingletonEntity};
+ use websocket::{Message, Sink, Stream, WebSocket, WebsocketMessage as _};
+ 
++use crate::settings::SshSettings;
+ use crate::terminal::bootstrap::init_shell_script_for_shell;
+ use crate::terminal::event_listener::ChannelEventListener;
+ use crate::terminal::model::ansi::Processor;
+ use crate::terminal::model::session::SessionId;
+ use crate::terminal::model::terminal_model::ExitReason;
+-use crate::settings::SshSettings;
+ use crate::terminal::session_settings::SessionSettings;
+-use crate::terminal::warpify::settings::WarpifySettings;
+ use crate::terminal::shell::ShellType;
++use crate::terminal::warpify::settings::WarpifySettings;
+ use crate::terminal::writeable_pty::Message as EventLoopMessage;
+ use crate::terminal::{SizeInfo, TerminalModel};
+ 
+@@ -174,12 +179,35 @@ impl SshWrapperEnv {
+         [
+             ("WARP_IS_LOCAL_SHELL_SESSION", "1"),
+             ("WARP_USE_SSH_WRAPPER", flag(self.enabled)),
+-            ("WARP_SSH_REUSE_CONTROL_MASTER", flag(self.reuse_control_master)),
++            (
++                "WARP_SSH_REUSE_CONTROL_MASTER",
++                flag(self.reuse_control_master),
++            ),
+             ("SSH_SOCKET_DIR", "$HOME/.ssh"),
+         ]
+     }
+ }
+ 
++/// What desktop's PTY environment tells CLI agent plugins (e.g. Warp's Claude Code plugin), so
++/// they report their status to Warp in structured notifications, which drive the agent
++/// notifications and the unread dot on tabs (local_tty/unix.rs).
++fn cli_agent_env_vars() -> Vec<(&'static str, String)> {
++    let mut vars = vec![
++        ("TERM_PROGRAM", "WarpTerminal".to_owned()),
++        (
++            WARP_CLIENT_VERSION_ENV,
++            ChannelState::app_version().unwrap_or("local").to_owned(),
++        ),
++    ];
++    if FeatureFlag::HOANotifications.is_enabled() {
++        vars.push((
++            WARP_CLI_AGENT_PROTOCOL_VERSION_ENV,
++            CLI_AGENT_PROTOCOL_VERSION.to_string(),
++        ));
++    }
++    vars
++}
++
+ pub(super) enum EventLoopEvent {
+     /// The PTY host saw what looks like a password prompt in the running command.
+     PossiblePasswordPrompt,
+@@ -229,9 +257,15 @@ impl EventLoop {
+         size_info: SizeInfo,
+         ctx: &mut ModelContext<Self>,
+     ) -> Self {
+-        let event_loop = Self::new(model, websocket_receiver, replies_tx, channel_event_listener);
++        let event_loop = Self::new(
++            model,
++            websocket_receiver,
++            replies_tx,
++            channel_event_listener,
++        );
+ 
+-        let url = Self::get_new_session_url(size_info, startup_directory.as_deref(), pane.as_deref());
++        let url =
++            Self::get_new_session_url(size_info, startup_directory.as_deref(), pane.as_deref());
+         let response = WebSocket::connect(url, None /* protocols */);
+ 
+         ctx.spawn(response, Self::on_ws_connection);
+@@ -495,7 +529,9 @@ impl EventLoop {
+                 log::info!("Remote shell exited with code {code}");
+                 self.shell_exited = true;
+                 // As on desktop: the pane closes (or shows the exit banner) once its shell ends.
+-                self.terminal_model.lock().exit(ExitReason::ShellProcessExited);
++                self.terminal_model
++                    .lock()
++                    .exit(ExitReason::ShellProcessExited);
+             }
+             Ok(HostControl::PasswordPrompt) => ctx.emit(EventLoopEvent::PossiblePasswordPrompt),
+             Err(_) => report_error!("Received unknown text message from the PTY host"),
+@@ -542,7 +578,7 @@ impl EventLoop {
+     /// (MAX_CANON on macOS) and drops the rest; the init line is longer. fish, which takes a
+     /// moment to start, lost it.
+     async fn wait_until_shell_reads_input(shell_output: &Receiver<()>) {
+-        use futures_util::future::{select, Either};
++        use futures_util::future::{Either, select};
+         let first = shell_output.recv();
+         futures_util::pin_mut!(first);
+         if let Either::Right(_) = select(first, Timer::after(SHELL_START_TIMEOUT)).await {
+@@ -580,7 +616,9 @@ impl EventLoop {
+             // every chunk typed (quadratic; over 15 s), so fish reads it from the terminal
+             // without the editor instead: raw mode for exact bytes, then the old mode back.
+             ShellType::Fish => {
+-                let len = crate::terminal::bootstrap::script_for_shell(ShellType::Fish, &crate::ASSETS).len();
++                let len =
++                    crate::terminal::bootstrap::script_for_shell(ShellType::Fish, &crate::ASSETS)
++                        .len();
+                 format!(
+                     " eval '{script}'; set -l __warp_tty (command stty -g); command stty raw -echo; \
+                      command head -c {len} | source; command stty $__warp_tty; set -e __warp_tty"
+@@ -617,7 +655,12 @@ impl EventLoop {
+         // The host's shell runs on the user's machine, so it's a local session like a desktop
+         // Warp shell: these make the bootstrap wrap `ssh` and Warpify the remote shell, as the
+         // desktop PTY's environment does (local_tty/unix.rs).
+-        for (name, value) in ssh_wrapper.vars() {
++        let vars = ssh_wrapper
++            .vars()
++            .map(|(name, value)| (name, value.to_owned()))
++            .into_iter()
++            .chain(cli_agent_env_vars());
++        for (name, value) in vars {
+             env_vars.push_str(&match shell_type {
+                 ShellType::Fish => format!(" set -gx {name} {value};"),
+                 _ => format!(r#" export {name}="{value}";"#),
+diff --git a/app/src/terminal/remote_tty/event_loop_tests.rs b/app/src/terminal/remote_tty/event_loop_tests.rs
+index decd336..1d4f442 100644
+--- a/app/src/terminal/remote_tty/event_loop_tests.rs
++++ b/app/src/terminal/remote_tty/event_loop_tests.rs
+@@ -16,7 +16,10 @@ fn shell_type_from_endpoint_reads_the_shell_parameter() {
+ 
+ #[test]
+ fn shell_type_from_endpoint_defaults_to_zsh() {
+-    assert_eq!(shell_type_from_endpoint(CREATE_SESSION_ENDPOINT), ShellType::Zsh);
++    assert_eq!(
++        shell_type_from_endpoint(CREATE_SESSION_ENDPOINT),
++        ShellType::Zsh
++    );
+     assert_eq!(
+         shell_type_from_endpoint("ws://127.0.0.1:1/create?token=abc&shell=nu"),
+         ShellType::Zsh
+diff --git a/app/src/terminal/remote_tty/terminal_manager.rs b/app/src/terminal/remote_tty/terminal_manager.rs
+index d54145e..f8814d6 100644
+--- a/app/src/terminal/remote_tty/terminal_manager.rs
++++ b/app/src/terminal/remote_tty/terminal_manager.rs
+@@ -9,21 +9,21 @@ use pathfinder_geometry::vector::Vector2F;
+ use warpui::{AppContext, ModelHandle, ViewHandle, WindowId};
+ 
+ use crate::ai::blocklist::InputConfig;
++use crate::ai::blocklist::SerializedBlockListItem;
+ use crate::context_chips::prompt_type::PromptType;
+ use crate::pane_group::TerminalViewResources;
+-use crate::ai::blocklist::SerializedBlockListItem;
+ use crate::persistence::ModelEvent;
+ use crate::terminal::event_listener::ChannelEventListener;
+ use crate::terminal::model::session::Sessions;
+ use crate::terminal::model_events::{ModelEventDispatcher, SshRemoteServerSupport};
+ use crate::terminal::remote_tty::event_loop::{EventLoop, EventLoopEvent};
+-use crate::terminal::writeable_pty::terminal_surface::TerminalSurface as _;
+ use crate::terminal::shell::ShellName;
+ use crate::terminal::terminal_manager::BlockSpacing;
+ use crate::terminal::writeable_pty::pty_controller::{EventLoopSendError, EventLoopSender};
+ use crate::terminal::writeable_pty::terminal_manager_util::{
+     init_pty_controller_model, wire_up_pty_controller_with_surface,
+ };
++use crate::terminal::writeable_pty::terminal_surface::TerminalSurface as _;
+ use crate::terminal::writeable_pty::{self, Message};
+ use crate::terminal::{
+     ShellLaunchState, SizeInfo, TerminalManager as TerminalManagerTrait, TerminalModel,
+@@ -78,17 +78,16 @@ impl TerminalManager {
+         let sessions: ModelHandle<Sessions> =
+             ctx.add_model(|ctx| Sessions::new(executor_command_tx, ctx));
+ 
+-        let model_events =
+-            ctx.add_model(|ctx| {
+-                // The SSH extension (remote server) needs local ssh/scp processes, which the web
+-                // build can't spawn; SSH sessions are Warpified by the shell wrapper alone.
+-                ModelEventDispatcher::new_with_ssh_remote_server_support(
+-                    events_rx,
+-                    sessions.clone(),
+-                    SshRemoteServerSupport::Disabled,
+-                    ctx,
+-                )
+-            });
++        let model_events = ctx.add_model(|ctx| {
++            // The SSH extension (remote server) needs local ssh/scp processes, which the web
++            // build can't spawn; SSH sessions are Warpified by the shell wrapper alone.
++            ModelEventDispatcher::new_with_ssh_remote_server_support(
++                events_rx,
++                sessions.clone(),
++                SshRemoteServerSupport::Disabled,
++                ctx,
++            )
++        });
+ 
+         // Create the terminal model.
+         let model = terminal_manager::create_terminal_model(
+diff --git a/app/src/terminal/view/link_detection.rs b/app/src/terminal/view/link_detection.rs
+index 8c17b76..259bd13 100644
+--- a/app/src/terminal/view/link_detection.rs
++++ b/app/src/terminal/view/link_detection.rs
+@@ -144,10 +144,7 @@ impl GridHighlightedLink {
+     pub fn tooltip_text(&self) -> &'static str {
+         match &self {
+             #[cfg(feature = "file_links")]
+-            GridHighlightedLink::File(file_link) if file_link.get_inner().is_dir =>
+-            {
+-                "Open folder"
+-            }
++            GridHighlightedLink::File(file_link) if file_link.get_inner().is_dir => "Open folder",
+             #[cfg(feature = "file_links")]
+             GridHighlightedLink::File(_) => "Open file",
+             GridHighlightedLink::Url(_) => "Open link",
+@@ -642,8 +639,7 @@ impl super::TerminalView {
+         max_columns: usize,
+     ) -> Vec<PathCandidate> {
+         let mut candidates = vec![];
+-        for (possible_path_index, within_model_possible_path) in possible_paths.iter().enumerate()
+-        {
++        for (possible_path_index, within_model_possible_path) in possible_paths.iter().enumerate() {
+             let possible_path = within_model_possible_path.get_inner();
+             let line_and_column_num = possible_path.path.line_and_column_num;
+             let mut push = |path: &str, range: std::ops::RangeInclusive<Point>| {
+@@ -775,18 +771,19 @@ impl super::TerminalView {
+         self.file_link_scan_handle = Some(ctx.spawn(
+             crate::platform::wasm::resolve_paths_in_host(working_directory, paths),
+             move |me, resolved, ctx| {
+-                let link = candidates
+-                    .into_iter()
+-                    .zip(resolved)
+-                    .find_map(|(candidate, resolved)| {
+-                        let resolved = resolved?;
+-                        Some(Self::create_valid_link(
+-                            PathBuf::from(resolved.absolute_path),
+-                            resolved.is_dir,
+-                            candidate,
+-                            &possible_paths,
+-                        ))
+-                    });
++                let link =
++                    candidates
++                        .into_iter()
++                        .zip(resolved)
++                        .find_map(|(candidate, resolved)| {
++                            let resolved = resolved?;
++                            Some(Self::create_valid_link(
++                                PathBuf::from(resolved.absolute_path),
++                                resolved.is_dir,
++                                candidate,
++                                &possible_paths,
++                            ))
++                        });
+                 me.handle_file_link_completed(link.map(GridHighlightedLink::File), ctx);
+             },
+         ));
+diff --git a/app/src/util/file.rs b/app/src/util/file.rs
+index 4f4417e..0d8aae7 100644
+--- a/app/src/util/file.rs
++++ b/app/src/util/file.rs
+@@ -2,9 +2,9 @@ pub mod external_editor;
+ use std::path::{Path, PathBuf};
+ use std::{fs, io};
+ 
++use warp_util::path::CleanPathResult;
+ #[cfg(windows)]
+ use warp_util::path::is_network_resource;
+-use warp_util::path::CleanPathResult;
+ 
+ pub use self::external_editor::{open_file_path_in_external_editor, open_file_path_with_editor};
+ pub use super::file_link::FileLink;
+diff --git a/app/src/voltron.rs b/app/src/voltron.rs
+index 7e5fed1..575dd3d 100644
+--- a/app/src/voltron.rs
++++ b/app/src/voltron.rs
+@@ -548,7 +548,11 @@ impl View for Voltron {
+                 .finish(),
+         )
+         // Embedded (`remote_tty`) builds often live in short panels; see the command palette.
+-        .with_margin_top(if cfg!(feature = "remote_tty") { 12. } else { 117. })
++        .with_margin_top(if cfg!(feature = "remote_tty") {
++            12.
++        } else {
++            117.
++        })
+         .with_background(theme.surface_2())
+         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
+         .with_border(Border::all(1.0).with_border_fill(theme.outline()));
+diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
+index 1300991..151d80e 100644
+--- a/app/src/workspace/view.rs
++++ b/app/src/workspace/view.rs
+@@ -6794,6 +6794,14 @@ impl Workspace {
+                     ctx,
+                 );
+             }
++            LeftPanelEvent::FocusTerminalView(terminal_view_id) => {
++                self.handle_action(
++                    &WorkspaceAction::FocusTerminalViewInWorkspace {
++                        terminal_view_id: *terminal_view_id,
++                    },
++                    ctx,
++                );
++            }
+             LeftPanelEvent::RunCommandInNewTab(command) => {
+                 self.add_terminal_tab(false, ctx);
+                 self.insert_in_input(command.trim(), true, true, false, ctx);
+diff --git a/app/src/workspace/view/agent_conversations.rs b/app/src/workspace/view/agent_conversations.rs
+index 2868946..f0330c9 100644
+--- a/app/src/workspace/view/agent_conversations.rs
++++ b/app/src/workspace/view/agent_conversations.rs
+@@ -2,6 +2,9 @@
+ //! (Claude Code, Codex, Gemini CLI) from anywhere on the machine, as listed by the embedding host
+ //! (the VS Code panel). Hovering a row streams a short AI summary of it from the host; clicking
+ //! opens it in the host (Claude Code) or resumes it in a new tab (agents that run in a terminal).
++//! A conversation running in one of Warp's own tabs gets the same unread dot as that tab in the
++//! vertical tabs (it finished or needs input while you weren't looking), and clicking it goes to
++//! that tab.
+ 
+ use std::collections::HashMap;
+ use std::ops::Range;
+@@ -21,11 +24,13 @@ use warpui::elements::{
+     ScrollableElement, ScrollbarWidth, Shrinkable, Stack, Text, UniformList, UniformListState,
+ };
+ use warpui::platform::Cursor;
+-use warpui::{AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext};
++use warpui::{AppContext, Entity, EntityId, SingletonEntity, TypedActionView, View, ViewContext};
+ 
++use crate::ai::agent_management::AgentNotificationsModel;
+ use crate::ai::blocklist::CLAUDE_ORANGE;
+ use crate::appearance::Appearance;
+-use crate::terminal::cli_agent::GEMINI_BLUE;
++use crate::terminal::cli_agent::{CLIAgent, GEMINI_BLUE};
++use crate::terminal::cli_agent_sessions::{CLIAgentSessionsModel, CLIAgentSessionsModelEvent};
+ use crate::ui_components::icons::Icon;
+ use crate::util::time_format::format_approx_duration_from_now_utc;
+ use crate::workspace::header_toolbar_item::HeaderToolbarItemKind;
+@@ -37,6 +42,7 @@ const SUMMARY_HOVER_DELAY: Duration = Duration::from_millis(450);
+ const ICON_SIZE: f32 = 16.;
+ const ICON_SPACING: f32 = 8.;
+ const SUMMARY_MAX_WIDTH: f32 = 360.;
++const UNREAD_DOT_SIZE: f32 = 8.;
+ 
+ #[derive(Clone, Debug, serde::Deserialize)]
+ #[serde(rename_all = "camelCase")]
+@@ -74,6 +80,8 @@ pub enum AgentConversationsAction {
+ }
+ 
+ pub enum AgentConversationsEvent {
++    /// Show the Warp pane this conversation runs in.
++    FocusTerminalView(EntityId),
+     /// Run this command in a new terminal tab (resumes an agent that runs in a terminal).
+     #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+     RunInNewTab(String),
+@@ -92,7 +100,23 @@ pub struct AgentConversationsView {
+ }
+ 
+ impl AgentConversationsView {
+-    pub fn new(_ctx: &mut ViewContext<Self>) -> Self {
++    pub fn new(ctx: &mut ViewContext<Self>) -> Self {
++        // Redraw the unread dots as Warp's agent notifications come and go, and reload the list
++        // when an agent in a Warp tab starts or changes status (its transcript changed).
++        ctx.subscribe_to_model(&AgentNotificationsModel::handle(ctx), |_, _, _, ctx| {
++            ctx.notify();
++        });
++        ctx.subscribe_to_model(&CLIAgentSessionsModel::handle(ctx), |me, _, event, ctx| {
++            if matches!(
++                event,
++                CLIAgentSessionsModelEvent::Started { .. }
++                    | CLIAgentSessionsModelEvent::StatusChanged { .. }
++            ) && me.loaded
++            {
++                me.refresh(ctx);
++            }
++            ctx.notify();
++        });
+         Self {
+             conversations: Vec::new(),
+             loaded: false,
+@@ -222,6 +246,14 @@ impl AgentConversationsView {
+         let Some(conversation) = self.conversations.get(index) else {
+             return;
+         };
++        if let Some(pane) =
++            warp_panes(ctx).get(&(conversation.agent.as_str(), conversation.id.as_str()))
++        {
++            ctx.emit(AgentConversationsEvent::FocusTerminalView(
++                pane.terminal_view_id,
++            ));
++            return;
++        }
+         #[cfg(target_family = "wasm")]
+         {
+             let agent = conversation.agent.clone();
+@@ -260,6 +292,42 @@ impl TypedActionView for AgentConversationsView {
+     }
+ }
+ 
++/// A conversation that runs in one of Warp's panes.
++struct WarpPane {
++    terminal_view_id: EntityId,
++    unread: bool,
++}
++
++/// The host's name for a CLI agent, as in `HostAgentConversation::agent`.
++fn host_agent_name(agent: CLIAgent) -> Option<&'static str> {
++    match agent {
++        CLIAgent::Claude => Some("claude"),
++        CLIAgent::Codex => Some("codex"),
++        CLIAgent::Gemini => Some("gemini"),
++        _ => None,
++    }
++}
++
++/// Conversations running in Warp's panes, by (host agent name, conversation id). Only agents
++/// whose plugin reports its session id (e.g. Warp's Claude Code plugin) can be matched.
++fn warp_panes(app: &AppContext) -> HashMap<(&'static str, &str), WarpPane> {
++    let notifications = AgentNotificationsModel::as_ref(app).notifications();
++    CLIAgentSessionsModel::as_ref(app)
++        .sessions()
++        .filter_map(|(terminal_view_id, session)| {
++            let agent = host_agent_name(session.agent)?;
++            let id = session.session_context.session_id.as_deref()?;
++            Some((
++                (agent, id),
++                WarpPane {
++                    terminal_view_id,
++                    unread: notifications.has_unread_for_terminal_view(terminal_view_id),
++                },
++            ))
++        })
++        .collect()
++}
++
+ /// The agent's logo and the color to draw it in.
+ fn agent_icon(agent: &str, appearance: &Appearance) -> (Icon, ThemeFill) {
+     let theme = appearance.theme();
+@@ -335,6 +403,7 @@ fn render_row(
+     is_hovered: bool,
+     summary: Option<&Summary>,
+     popover_opens_right: bool,
++    unread: bool,
+     mouse_state: MouseStateHandle,
+     app: &AppContext,
+ ) -> Box<dyn Element> {
+@@ -351,12 +420,20 @@ fn render_row(
+     let title = Text::new_inline(conversation.title.clone(), font_family, font_size + 1.)
+         .with_color(theme.main_text_color(theme.background()).into())
+         .finish();
+-    let title_row = Flex::row()
++    let mut title_row = Flex::row()
+         .with_cross_axis_alignment(CrossAxisAlignment::Center)
+         .with_spacing(ICON_SPACING)
+         .with_child(icon)
+-        .with_child(Shrinkable::new(1.0, title).finish())
+-        .finish();
++        .with_child(Shrinkable::new(1.0, title).finish());
++    if unread {
++        title_row.add_child(
++            ConstrainedBox::new(Icon::CircleFilled.to_warpui_icon(theme.accent()).finish())
++                .with_width(UNREAD_DOT_SIZE)
++                .with_height(UNREAD_DOT_SIZE)
++                .finish(),
++        );
++    }
++    let title_row = title_row.finish();
+ 
+     let home_dir = dirs::home_dir().and_then(|path| path.to_str().map(String::from));
+     let cwd = conversation
+@@ -483,6 +560,7 @@ impl View for AgentConversationsView {
+             .header_toolbar_chip_selection
+             .left_items()
+             .contains(&HeaderToolbarItemKind::ToolsPanel);
++        let warp_panes = warp_panes(app);
+         let rows: Vec<Box<dyn Element>> = self
+             .conversations
+             .iter()
+@@ -495,6 +573,9 @@ impl View for AgentConversationsView {
+                     is_hovered,
+                     self.summaries.get(&conversation.summary_key()),
+                     popover_opens_right,
++                    warp_panes
++                        .get(&(conversation.agent.as_str(), conversation.id.as_str()))
++                        .is_some_and(|pane| pane.unread),
+                     self.row_states[index].clone(),
+                     app,
+                 )
+diff --git a/app/src/workspace/view/left_panel.rs b/app/src/workspace/view/left_panel.rs
+index 60d3e03..dc3b3b8 100644
+--- a/app/src/workspace/view/left_panel.rs
++++ b/app/src/workspace/view/left_panel.rs
+@@ -150,6 +150,8 @@ pub enum LeftPanelEvent {
+     SignInRequested,
+     /// Run this command in a new terminal tab.
+     RunCommandInNewTab(String),
++    /// Show the terminal pane with this view (from the Agents panel).
++    FocusTerminalView(warpui::EntityId),
+ }
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -381,6 +383,9 @@ impl LeftPanelView {
+                 AgentConversationsEvent::RunInNewTab(command) => {
+                     ctx.emit(LeftPanelEvent::RunCommandInNewTab(command.clone()));
+                 }
++                AgentConversationsEvent::FocusTerminalView(terminal_view_id) => {
++                    ctx.emit(LeftPanelEvent::FocusTerminalView(*terminal_view_id));
++                }
+             },
+         );
+ 
+diff --git a/app/src/workspaces/user_workspaces/mod.rs b/app/src/workspaces/user_workspaces/mod.rs
+index 11fca44..95c4451 100644
+--- a/app/src/workspaces/user_workspaces/mod.rs
++++ b/app/src/workspaces/user_workspaces/mod.rs
+@@ -1690,7 +1690,11 @@ impl UserWorkspaces {
+     /// Updates whether or not session sharing is enabled based on the current team's tier policy.
+     fn update_session_sharing_enablement(&self, ctx: &AppContext) {
+         // Embedded builds have no session sharing (it needs a Warp account); see `features.rs`.
+-        if cfg!(any(test, feature = "integration_tests", feature = "remote_tty")) {
++        if cfg!(any(
++            test,
++            feature = "integration_tests",
++            feature = "remote_tty"
++        )) {
+             return;
+         }
+ 

@@ -1,7 +1,7 @@
 From 7a26a4e67f9dee399c963b94d1cd9d6890218f67 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 01:50:38 -0700
-Subject: [PATCH 31/50] Hide account and missing-feature UI in embedded builds
+Subject: [PATCH 31/52] Hide account and missing-feature UI in embedded builds
 
 The user menu ends after "Join our Slack community" (no Sign up, Upgrade, Invite a friend, Log
 out, What's new). "Keyboard shortcuts" and Cmd+/ open the settings page instead of the resource

@@ -1,7 +1,7 @@
 From fe471ebe157627d0b6b411c279166e2851a99d71 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 15:13:44 -0700
-Subject: [PATCH 41/50] Don't cancel every in-band command when a completion is
+Subject: [PATCH 41/52] Don't cancel every in-band command when a completion is
  aborted
 
 Aborting a stale completion, autosuggestion or decoration future already

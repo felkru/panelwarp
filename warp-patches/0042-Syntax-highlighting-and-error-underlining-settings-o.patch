@@ -1,7 +1,7 @@
 From b780d13d091c4e4394acd25b82743208e06cff71 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 15:13:44 -0700
-Subject: [PATCH 42/50] Syntax highlighting and error underlining settings on
+Subject: [PATCH 42/52] Syntax highlighting and error underlining settings on
  the web
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

@@ -1,7 +1,7 @@
 From b5c5245985bdea88136acdea62e14aeeb039a9f2 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 15:43:15 -0700
-Subject: [PATCH 45/50] Notification body and an audible bell on the web
+Subject: [PATCH 45/52] Notification body and an audible bell on the web
 
 Web notifications now carry their body and respect play_sound, and the audible bell
 asks the host page to play it (window.warpPanelBell), so the setting is offered on

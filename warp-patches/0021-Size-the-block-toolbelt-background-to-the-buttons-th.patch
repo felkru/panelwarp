@@ -1,7 +1,7 @@
 From f7c294303f042c790334b3f8b041b7ae54f3b5c9 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 18:13:20 -0700
-Subject: [PATCH 21/50] Size the block toolbelt background to the buttons that
+Subject: [PATCH 21/52] Size the block toolbelt background to the buttons that
  are shown
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

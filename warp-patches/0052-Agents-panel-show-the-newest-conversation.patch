@@ -1,0 +1,97 @@
+From 241522846046fa15a91bd02acd04cf6190cc830a Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Sun, 11 Oct 2026 10:03:14 -0700
+Subject: [PATCH 52/52] Agents panel: show the newest conversation
+
+The list renders one row by itself to measure the row height, which took the
+pre-built first row, so the newest conversation never showed. Rows are now built when
+the list asks for them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/workspace/view/agent_conversations.rs | 59 +++++++++++--------
+ 1 file changed, 35 insertions(+), 24 deletions(-)
+
+diff --git a/app/src/workspace/view/agent_conversations.rs b/app/src/workspace/view/agent_conversations.rs
+index f0330c9..bb09c34 100644
+--- a/app/src/workspace/view/agent_conversations.rs
++++ b/app/src/workspace/view/agent_conversations.rs
+@@ -66,7 +66,7 @@ impl HostAgentConversation {
+     }
+ }
+ 
+-#[derive(Default)]
++#[derive(Clone, Default)]
+ struct Summary {
+     text: String,
+     error: Option<String>,
+@@ -560,35 +560,46 @@ impl View for AgentConversationsView {
+             .header_toolbar_chip_selection
+             .left_items()
+             .contains(&HeaderToolbarItemKind::ToolsPanel);
+-        let warp_panes = warp_panes(app);
+-        let rows: Vec<Box<dyn Element>> = self
+-            .conversations
+-            .iter()
+-            .enumerate()
+-            .map(|(index, conversation)| {
+-                let is_hovered = self.hovered_index == Some(index);
+-                render_row(
+-                    conversation,
+-                    index,
+-                    is_hovered,
+-                    self.summaries.get(&conversation.summary_key()),
+-                    popover_opens_right,
++        // Rows are built when the list asks for them: it renders one row on its own first to
++        // measure the row height, so pre-built rows that can only be taken once lose the first.
++        let unread: Vec<bool> = {
++            let warp_panes = warp_panes(app);
++            self.conversations
++                .iter()
++                .map(|conversation| {
+                     warp_panes
+                         .get(&(conversation.agent.as_str(), conversation.id.as_str()))
+-                        .is_some_and(|pane| pane.unread),
+-                    self.row_states[index].clone(),
+-                    app,
+-                )
+-            })
+-            .collect();
+-        let rows = Arc::new(Mutex::new(rows.into_iter().map(Some).collect::<Vec<_>>()));
++                        .is_some_and(|pane| pane.unread)
++                })
++                .collect()
++        };
++        let conversations = self.conversations.clone();
++        let hovered_summary = self
++            .hovered_index
++            .and_then(|index| self.conversations.get(index))
++            .and_then(|conversation| self.summaries.get(&conversation.summary_key()))
++            .cloned();
++        let hovered_index = self.hovered_index;
++        let row_states = self.row_states.clone();
+         let list = UniformList::new(
+             self.list_state.clone(),
+             self.conversations.len(),
+-            move |range: Range<usize>, _: &AppContext| {
+-                let mut rows = rows.lock().expect("rows lock poisoned");
++            move |range: Range<usize>, app: &AppContext| {
+                 range
+-                    .filter_map(|index| rows.get_mut(index).and_then(Option::take))
++                    .filter_map(|index| {
++                        let conversation = conversations.get(index)?;
++                        let is_hovered = hovered_index == Some(index);
++                        Some(render_row(
++                            conversation,
++                            index,
++                            is_hovered,
++                            hovered_summary.as_ref().filter(|_| is_hovered),
++                            popover_opens_right,
++                            unread[index],
++                            row_states[index].clone(),
++                            app,
++                        ))
++                    })
+                     .collect::<Vec<_>>()
+                     .into_iter()
+             },

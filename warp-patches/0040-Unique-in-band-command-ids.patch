@@ -1,7 +1,7 @@
 From 0c45c7ff718a39cd5922b987ff3a9098d019ca91 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 15:13:44 -0700
-Subject: [PATCH 40/50] Unique in-band command ids
+Subject: [PATCH 40/52] Unique in-band command ids
 
 On the web the clock only has millisecond resolution, so in-band commands
 queued together got the same id. Cancelling one of them (by id) removed the
