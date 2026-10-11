@@ -1,7 +1,7 @@
 From 34c215eaf8db0e13df38ce28e077d497745390cf Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 13:33:29 -0700
-Subject: [PATCH 01/53] remote_tty: read the PTY endpoint (with auth token)
+Subject: [PATCH 01/54] remote_tty: read the PTY endpoint (with auth token)
  from the page fragment
 
 Embedders pass #pty_url=ws://127.0.0.1:PORT/create?token=... so the PTY backend can use a random

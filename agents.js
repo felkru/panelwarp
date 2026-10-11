@@ -29,6 +29,9 @@ const PENDING_OPEN_MAX_AGE = 2 * 60 * 1000;
 // When each conversation was last seen (agent:id -> ms), shared by all windows, and when this
 // tracking started: turns that finished earlier count as seen.
 const SEEN_KEY = 'warp.agentsSeen';
+// A turn whose session file hasn't changed for this long isn't running anymore (the agent was
+// closed or crashed mid-turn). Long tool calls and permission prompts stay under it.
+const STALE_TURN_MS = 30 * 60 * 1000;
 const SEEN_SINCE_KEY = 'warp.agentsSeenSince';
 
 function readRange(file, start, length) {
@@ -121,19 +124,25 @@ const claude = {
     }
     if (!firstPrompt) return null;
     let title = '';
-    // When the latest turn ended (Claude writes `turn_duration` then), or 0 while one runs.
+    // When the latest turn ended (Claude writes `turn_duration` then), or 0 while one runs or
+    // after it was interrupted.
     let doneAt = 0;
+    let state = 'idle';
     for (const entry of jsonLines(file, size, 'tail')) {
       if (entry.type === 'ai-title' && entry.aiTitle) title = entry.aiTitle;
       else if (entry.type === 'summary' && entry.summary && !title) title = entry.summary;
       if (entry.isSidechain) continue;
       if (entry.type === 'system' && entry.subtype === 'turn_duration') {
         doneAt = Date.parse(entry.timestamp) || 0;
+        state = 'done';
       } else if ((entry.type === 'user' && !entry.isMeta) || entry.type === 'assistant') {
         doneAt = 0;
+        const interrupted =
+          entry.type === 'user' && /^\[Request interrupted by user/.test(contentText(entry.message?.content));
+        state = interrupted ? 'idle' : 'working';
       }
     }
-    return { id: path.basename(file, '.jsonl'), title: oneLine(title || firstPrompt), cwd, doneAt };
+    return { id: path.basename(file, '.jsonl'), title: oneLine(title || firstPrompt), cwd, doneAt, state };
   },
 
   /** [{role, text}] of the conversation's end. */
@@ -177,12 +186,21 @@ const codex = {
     id ||= path.basename(file, '.jsonl').match(/([0-9a-f]{8}-[0-9a-f-]{27})$/i)?.[1] || '';
     if (!id || !firstPrompt) return null;
     let doneAt = 0;
+    let state = 'idle';
     for (const entry of jsonLines(file, size, 'tail')) {
       const event = entry.type === 'event_msg' ? entry.payload?.type : null;
-      if (event === 'task_complete') doneAt = Date.parse(entry.timestamp) || 0;
-      else if (event === 'task_started' || event === 'user_message') doneAt = 0;
+      if (event === 'task_complete') {
+        doneAt = Date.parse(entry.timestamp) || 0;
+        state = 'done';
+      } else if (event === 'turn_aborted') {
+        doneAt = 0;
+        state = 'idle';
+      } else if (event === 'task_started' || event === 'user_message') {
+        doneAt = 0;
+        state = 'working';
+      }
     }
-    return { id, title: oneLine(firstPrompt), cwd, doneAt };
+    return { id, title: oneLine(firstPrompt), cwd, doneAt, state };
   },
 
   transcript: ({ file, size }) => jsonLines(file, size, 'tail').map(codexMessage).filter(Boolean),
@@ -214,7 +232,8 @@ const gemini = {
     // Gemini writes the file once a reply is complete, so an answered last prompt is a done turn.
     const last = (chat.messages || []).filter((m) => m.type === 'user' || m.type === 'gemini').at(-1);
     const doneAt = last?.type === 'gemini' ? Date.parse(last.timestamp || chat.lastUpdated) || entry.mtimeMs : 0;
-    return { id: chat.sessionId, title: oneLine(firstPrompt), cwd: projectRoots.get(hash) || '', doneAt };
+    const state = doneAt ? 'done' : 'working';
+    return { id: chat.sessionId, title: oneLine(firstPrompt), cwd: projectRoots.get(hash) || '', doneAt, state };
   },
 
   transcript: (entry) => gemini.read(entry).turns,
@@ -274,8 +293,10 @@ class AgentConversations {
     const seen = this.globalState.get(SEEN_KEY) || {};
     const since = this.seenSince();
     return JSON.stringify(
-      listed.map(({ doneAt, ...conversation }) => ({
+      listed.map(({ doneAt, state, ...conversation }) => ({
         ...conversation,
+        // `working` while a turn runs; one that stopped writing long ago crashed or was closed.
+        status: state === 'working' && Date.now() - conversation.updatedAt > STALE_TURN_MS ? 'idle' : state,
         // Its latest turn finished after you last looked at it (here or in its Claude tab).
         unread: doneAt > Math.max(since, seen[`${conversation.agent}:${conversation.id}`] || 0),
       })),

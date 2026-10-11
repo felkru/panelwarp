@@ -1,7 +1,7 @@
 From 9970ae316960814f366612733d5f37d80e49e47b Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 13:40:35 -0700
-Subject: [PATCH 37/53] Always suggest a fix after a failed command in embedded
+Subject: [PATCH 37/54] Always suggest a fix after a failed command in embedded
  builds
 
 Warp now always asks the host app for Next Command while private routing is

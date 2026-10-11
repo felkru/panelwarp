@@ -1,7 +1,7 @@
 From 8b70edbccbec0af0fcd96701bfc1cd100c8b7454 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 13:54:27 -0700
-Subject: [PATCH 11/53] embedded: center the command palette instead of a fixed
+Subject: [PATCH 11/54] embedded: center the command palette instead of a fixed
  top offset
 
 Short host panels (e.g. VS Code's bottom panel) pushed the palette out of view.

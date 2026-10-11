@@ -1,7 +1,7 @@
 From 06b23885bd7807dc6cff25fda77ddf89e7a5310d Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 16:16:55 -0700
-Subject: [PATCH 18/53] Remove Warp Agent entry points in embedded builds
+Subject: [PATCH 18/54] Remove Warp Agent entry points in embedded builds
 
 No agent view (cmd+enter, /agent), no agent hint message bar, no zero
 state block, and no slash command or @ menus in the terminal input.

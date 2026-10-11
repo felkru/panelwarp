@@ -1,7 +1,7 @@
 From 241522846046fa15a91bd02acd04cf6190cc830a Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Sun, 11 Oct 2026 10:03:14 -0700
-Subject: [PATCH 52/53] Agents panel: show the newest conversation
+Subject: [PATCH 52/54] Agents panel: show the newest conversation
 
 The list renders one row by itself to measure the row height, which took the
 pre-built first row, so the newest conversation never showed. Rows are now built when

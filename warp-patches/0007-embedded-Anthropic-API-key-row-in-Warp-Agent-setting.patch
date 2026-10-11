@@ -1,7 +1,7 @@
 From 6773c83764672ccd653ddbef31fe299f7a9059ea Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 13:45:57 -0700
-Subject: [PATCH 07/53] embedded: Anthropic API key row in Warp Agent settings
+Subject: [PATCH 07/54] embedded: Anthropic API key row in Warp Agent settings
 
 The key is handed straight to the host app (window.warpPanelStoreApiKey) and never kept in
 Warp. Deep link: warp://settings?widget=host_api_key. The '#' trigger toggle is enabled whenever

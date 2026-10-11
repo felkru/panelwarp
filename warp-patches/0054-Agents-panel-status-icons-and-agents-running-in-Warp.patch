@@ -1,0 +1,368 @@
+From 327095b6cc519a6285a0162599e69ec1ad0bf9b0 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Sun, 11 Oct 2026 11:04:07 -0700
+Subject: [PATCH 54/54] Agents panel: status icons and agents running in Warp's
+ panes
+
+Rows show the agent's icon with the vertical tabs' status badge (in progress, done, needs
+input): from Warp's own session for a conversation in one of its panes, else from the
+host's status read from the session file. Agents in Warp's panes that the host doesn't
+list (any CLI agent Warp detects) get their own rows at the top; clicking one goes to its
+pane.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/workspace/view/agent_conversations.rs | 206 ++++++++++++++----
+ 1 file changed, 163 insertions(+), 43 deletions(-)
+
+diff --git a/app/src/workspace/view/agent_conversations.rs b/app/src/workspace/view/agent_conversations.rs
+index 7e0ad10..77ee022 100644
+--- a/app/src/workspace/view/agent_conversations.rs
++++ b/app/src/workspace/view/agent_conversations.rs
+@@ -28,11 +28,13 @@ use warpui::elements::{
+ use warpui::platform::Cursor;
+ use warpui::{AppContext, Entity, EntityId, SingletonEntity, TypedActionView, View, ViewContext};
+ 
++use crate::ai::agent::conversation::ConversationStatus;
+ use crate::ai::agent_management::AgentNotificationsModel;
+ use crate::ai::blocklist::CLAUDE_ORANGE;
+ use crate::appearance::Appearance;
+ use crate::terminal::cli_agent::{CLIAgent, GEMINI_BLUE};
+ use crate::terminal::cli_agent_sessions::{CLIAgentSessionsModel, CLIAgentSessionsModelEvent};
++use crate::ui_components::icon_with_status::{IconWithStatusVariant, render_icon_with_status};
+ use crate::ui_components::icons::Icon;
+ use crate::util::time_format::format_approx_duration_from_now_utc;
+ use crate::workspace::header_toolbar_item::HeaderToolbarItemKind;
+@@ -44,7 +46,7 @@ const SUMMARY_HOVER_DELAY: Duration = Duration::from_millis(450);
+ /// How often the list is reloaded from the host once it's been shown.
+ #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+ const REFRESH_INTERVAL: Duration = Duration::from_secs(4);
+-const ICON_SIZE: f32 = 16.;
++const ICON_SIZE: f32 = 20.;
+ const ICON_SPACING: f32 = 8.;
+ const SUMMARY_MAX_WIDTH: f32 = 360.;
+ const UNREAD_DOT_SIZE: f32 = 8.;
+@@ -61,6 +63,12 @@ struct HostAgentConversation {
+     /// Its latest turn finished after it was last seen, per the host.
+     #[serde(default)]
+     unread: bool,
++    /// `working`, `done` or `idle`, per the host.
++    #[serde(default)]
++    status: Option<String>,
++    /// For a row Warp added for an agent in one of its panes that the host doesn't list.
++    #[serde(skip)]
++    pane_only: Option<(EntityId, CLIAgent)>,
+ }
+ 
+ impl HostAgentConversation {
+@@ -96,7 +104,10 @@ pub enum AgentConversationsEvent {
+ }
+ 
+ pub struct AgentConversationsView {
++    /// The rows: agents in Warp's panes the host doesn't list, then the host's conversations.
+     conversations: Vec<HostAgentConversation>,
++    /// The host's list as last loaded.
++    host_conversations: Vec<HostAgentConversation>,
+     loaded: bool,
+     row_states: Vec<MouseStateHandle>,
+     list_hover: MouseStateHandle,
+@@ -118,18 +129,21 @@ impl AgentConversationsView {
+             ctx.notify();
+         });
+         ctx.subscribe_to_model(&CLIAgentSessionsModel::handle(ctx), |me, _, event, ctx| {
++            if !me.loaded {
++                return;
++            }
+             if matches!(
+                 event,
+                 CLIAgentSessionsModelEvent::Started { .. }
+                     | CLIAgentSessionsModelEvent::StatusChanged { .. }
+-            ) && me.loaded
+-            {
++            ) {
+                 me.refresh(ctx);
+             }
+-            ctx.notify();
++            me.rebuild_rows(ctx);
+         });
+         Self {
+             conversations: Vec::new(),
++            host_conversations: Vec::new(),
+             loaded: false,
+             row_states: Vec::new(),
+             list_hover: Default::default(),
+@@ -191,7 +205,9 @@ impl AgentConversationsView {
+         // A conversation running in a Warp pane that Warp considers seen is seen for the host too.
+         let warp_panes = warp_panes(ctx);
+         for conversation in &mut conversations {
+-            let pane = warp_panes.get(&(conversation.agent.as_str(), conversation.id.as_str()));
++            let pane = warp_panes
++                .iter()
++                .find(|pane| pane.matches(&conversation.agent, &conversation.id));
+             if conversation.unread && pane.is_some_and(|pane| !pane.unread) {
+                 conversation.unread = false;
+                 #[cfg(target_family = "wasm")]
+@@ -201,20 +217,47 @@ impl AgentConversationsView {
+                 );
+             }
+         }
++        self.host_conversations = conversations;
++        self.loaded = true;
++        self.rebuild_rows(ctx);
++    }
++
++    /// Rebuilds the rows from the host's list and the agents running in Warp's panes.
++    fn rebuild_rows(&mut self, ctx: &mut ViewContext<Self>) {
++        let now = Utc::now().timestamp_millis() as f64;
++        let mut rows: Vec<HostAgentConversation> = warp_panes(ctx)
++            .into_iter()
++            .filter(|pane| {
++                !self
++                    .host_conversations
++                    .iter()
++                    .any(|conversation| pane.matches(&conversation.agent, &conversation.id))
++            })
++            .map(|pane| HostAgentConversation {
++                agent: host_agent_name(pane.agent).unwrap_or_default().to_owned(),
++                id: format!("pane:{}", pane.terminal_view_id),
++                title: pane.title,
++                cwd: pane.cwd,
++                updated_at: now,
++                unread: false,
++                status: None,
++                pane_only: Some((pane.terminal_view_id, pane.agent)),
++            })
++            .collect();
++        rows.extend(self.host_conversations.iter().cloned());
++
+         // Keep the hover (and its summary) when the hovered row is still the same conversation.
+         let hovered = self
+             .hovered_index
+             .and_then(|index| self.conversations.get(index))
+             .map(|conversation| (conversation.agent.clone(), conversation.id.clone()));
+         let hovered_index = hovered.and_then(|(agent, id)| {
+-            conversations
+-                .iter()
++            rows.iter()
+                 .position(|conversation| conversation.agent == agent && conversation.id == id)
+         });
+         self.row_states
+-            .resize_with(conversations.len(), MouseStateHandle::default);
+-        self.conversations = conversations;
+-        self.loaded = true;
++            .resize_with(rows.len(), MouseStateHandle::default);
++        self.conversations = rows;
+         if hovered_index != self.hovered_index {
+             self.hovered_index = None;
+             self.cancel_hover_delay();
+@@ -235,8 +278,10 @@ impl AgentConversationsView {
+         self.hovered_index = index;
+         self.cancel_hover_delay();
+         if let Some(index) = index {
++            // The host can only summarize conversations it listed.
+             let already_requested = self.conversations.get(index).is_some_and(|conversation| {
+-                self.summaries.contains_key(&conversation.summary_key())
++                conversation.pane_only.is_some()
++                    || self.summaries.contains_key(&conversation.summary_key())
+             });
+             if !already_requested {
+                 self.hover_delay = Some(ctx.spawn(
+@@ -310,12 +355,15 @@ impl AgentConversationsView {
+             ctx.notify();
+         }
+         let conversation = &self.conversations[index];
+-        if let Some(pane) =
+-            warp_panes(ctx).get(&(conversation.agent.as_str(), conversation.id.as_str()))
+-        {
+-            ctx.emit(AgentConversationsEvent::FocusTerminalView(
+-                pane.terminal_view_id,
+-            ));
++        let pane_view_id = match conversation.pane_only {
++            Some((terminal_view_id, _)) => Some(terminal_view_id),
++            None => warp_panes(ctx)
++                .iter()
++                .find(|pane| pane.matches(&conversation.agent, &conversation.id))
++                .map(|pane| pane.terminal_view_id),
++        };
++        if let Some(terminal_view_id) = pane_view_id {
++            ctx.emit(AgentConversationsEvent::FocusTerminalView(terminal_view_id));
+             return;
+         }
+         #[cfg(target_family = "wasm")]
+@@ -356,10 +404,24 @@ impl TypedActionView for AgentConversationsView {
+     }
+ }
+ 
+-/// A conversation that runs in one of Warp's panes.
++/// A CLI agent running in one of Warp's panes.
+ struct WarpPane {
+     terminal_view_id: EntityId,
++    agent: CLIAgent,
++    /// The agent's conversation id, when its plugin reports one (e.g. Warp's Claude Code plugin).
++    session_id: Option<String>,
++    /// Only for plugin-backed sessions, like the vertical tabs.
++    status: Option<ConversationStatus>,
+     unread: bool,
++    title: String,
++    cwd: Option<String>,
++}
++
++impl WarpPane {
++    /// Whether this pane runs the host's conversation `agent`/`id`.
++    fn matches(&self, agent: &str, id: &str) -> bool {
++        host_agent_name(self.agent) == Some(agent) && self.session_id.as_deref() == Some(id)
++    }
+ }
+ 
+ /// The host's name for a CLI agent, as in `HostAgentConversation::agent`.
+@@ -372,24 +434,56 @@ fn host_agent_name(agent: CLIAgent) -> Option<&'static str> {
+     }
+ }
+ 
+-/// Conversations running in Warp's panes, by (host agent name, conversation id). Only agents
+-/// whose plugin reports its session id (e.g. Warp's Claude Code plugin) can be matched.
+-fn warp_panes(app: &AppContext) -> HashMap<(&'static str, &str), WarpPane> {
++fn cli_agent_from_host_name(agent: &str) -> Option<CLIAgent> {
++    match agent {
++        "claude" => Some(CLIAgent::Claude),
++        "codex" => Some(CLIAgent::Codex),
++        "gemini" => Some(CLIAgent::Gemini),
++        _ => None,
++    }
++}
++
++/// The CLI agents running in Warp's panes, oldest pane first.
++fn warp_panes(app: &AppContext) -> Vec<WarpPane> {
+     let notifications = AgentNotificationsModel::as_ref(app).notifications();
+-    CLIAgentSessionsModel::as_ref(app)
++    let mut panes: Vec<WarpPane> = CLIAgentSessionsModel::as_ref(app)
+         .sessions()
+-        .filter_map(|(terminal_view_id, session)| {
+-            let agent = host_agent_name(session.agent)?;
+-            let id = session.session_context.session_id.as_deref()?;
+-            Some((
+-                (agent, id),
+-                WarpPane {
+-                    terminal_view_id,
+-                    unread: notifications.has_unread_for_terminal_view(terminal_view_id),
+-                },
+-            ))
++        .filter(|(_, session)| !matches!(session.agent, CLIAgent::Unknown))
++        .map(|(terminal_view_id, session)| {
++            let context = &session.session_context;
++            WarpPane {
++                terminal_view_id,
++                agent: session.agent,
++                session_id: context.session_id.clone(),
++                status: (session.listener.is_some() && session.supports_rich_status())
++                    .then(|| session.status.to_conversation_status()),
++                unread: notifications.has_unread_for_terminal_view(terminal_view_id),
++                title: context
++                    .query
++                    .clone()
++                    .filter(|query| !query.is_empty())
++                    .unwrap_or_else(|| format!("{} in a Warp tab", session.agent.display_name())),
++                cwd: context.cwd.clone(),
++            }
+         })
+-        .collect()
++        .collect();
++    panes.sort_by_key(|pane| pane.terminal_view_id);
++    panes
++}
++
++/// The status a row shows: the pane's when the conversation runs in a Warp pane, else the host's.
++fn row_status(
++    conversation: &HostAgentConversation,
++    pane: Option<&WarpPane>,
++) -> Option<ConversationStatus> {
++    if let Some(pane) = pane {
++        return pane.status.clone();
++    }
++    match conversation.status.as_deref() {
++        Some("working") => Some(ConversationStatus::InProgress),
++        Some("done") => Some(ConversationStatus::Success),
++        _ => None,
++    }
+ }
+ 
+ /// The agent's logo and the color to draw it in.
+@@ -468,6 +562,7 @@ fn render_row(
+     summary: Option<&Summary>,
+     popover_opens_right: bool,
+     unread: bool,
++    status: Option<ConversationStatus>,
+     mouse_state: MouseStateHandle,
+     app: &AppContext,
+ ) -> Box<dyn Element> {
+@@ -476,11 +571,32 @@ fn render_row(
+     let font_family = appearance.ui_font_family();
+     let font_size = appearance.ui_font_size();
+ 
+-    let (icon, icon_color) = agent_icon(&conversation.agent, appearance);
+-    let icon = ConstrainedBox::new(icon.to_warpui_icon(icon_color).finish())
+-        .with_width(ICON_SIZE)
+-        .with_height(ICON_SIZE)
+-        .finish();
++    // The agent's icon with its status badge (in progress, done, needs input), as in the
++    // vertical tabs.
++    let agent = conversation
++        .pane_only
++        .map(|(_, agent)| agent)
++        .or_else(|| cli_agent_from_host_name(&conversation.agent));
++    let icon = match agent {
++        Some(agent) => render_icon_with_status(
++            IconWithStatusVariant::CLIAgent {
++                agent,
++                status,
++                is_ambient: false,
++            },
++            ICON_SIZE,
++            0.,
++            theme,
++            theme.background(),
++        ),
++        None => {
++            let (icon, icon_color) = agent_icon(&conversation.agent, appearance);
++            ConstrainedBox::new(icon.to_warpui_icon(icon_color).finish())
++                .with_width(ICON_SIZE)
++                .with_height(ICON_SIZE)
++                .finish()
++        }
++    };
+     let title = Text::new_inline(conversation.title.clone(), font_family, font_size + 1.)
+         .with_color(theme.main_text_color(theme.background()).into())
+         .finish();
+@@ -626,15 +742,18 @@ impl View for AgentConversationsView {
+             .contains(&HeaderToolbarItemKind::ToolsPanel);
+         // Rows are built when the list asks for them: it renders one row on its own first to
+         // measure the row height, so pre-built rows that can only be taken once lose the first.
+-        let unread: Vec<bool> = {
++        let states: Vec<(bool, Option<ConversationStatus>)> = {
+             let warp_panes = warp_panes(app);
+             self.conversations
+                 .iter()
+                 .map(|conversation| {
++                    let pane = warp_panes.iter().find(|pane| match conversation.pane_only {
++                        Some((terminal_view_id, _)) => pane.terminal_view_id == terminal_view_id,
++                        None => pane.matches(&conversation.agent, &conversation.id),
++                    });
+                     // Warp tracks the ones in its own panes; the host the rest.
+-                    warp_panes
+-                        .get(&(conversation.agent.as_str(), conversation.id.as_str()))
+-                        .map_or(conversation.unread, |pane| pane.unread)
++                    let unread = pane.map_or(conversation.unread, |pane| pane.unread);
++                    (unread, row_status(conversation, pane))
+                 })
+                 .collect()
+         };
+@@ -660,7 +779,8 @@ impl View for AgentConversationsView {
+                             is_hovered,
+                             hovered_summary.as_ref().filter(|_| is_hovered),
+                             popover_opens_right,
+-                            unread[index],
++                            states[index].0,
++                            states[index].1.clone(),
+                             row_states[index].clone(),
+                             app,
+                         ))

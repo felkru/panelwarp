@@ -1,7 +1,7 @@
 From 36122f4c2264e868f3df36a1cac0bc41caf2fee4 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Sun, 11 Oct 2026 09:58:27 -0700
-Subject: [PATCH 51/53] Agent notifications and unread dots for CLI agents in
+Subject: [PATCH 51/54] Agent notifications and unread dots for CLI agents in
  embedded builds
 
 The remote PTY's init line now sets what desktop's PTY environment does for CLI agent

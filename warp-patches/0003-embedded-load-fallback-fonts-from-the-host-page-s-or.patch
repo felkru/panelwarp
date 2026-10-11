@@ -1,7 +1,7 @@
 From b36faa2042e90ab93f7e90acc494a928653fecb3 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 13:33:29 -0700
-Subject: [PATCH 03/53] embedded: load fallback fonts from the host page's
+Subject: [PATCH 03/54] embedded: load fallback fonts from the host page's
  origin
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

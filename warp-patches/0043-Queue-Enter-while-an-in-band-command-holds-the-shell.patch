@@ -1,7 +1,7 @@
 From 367b17adcaf82477ab59fd98fcdd5be8251e3f77 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 15:28:06 -0700
-Subject: [PATCH 43/53] Queue Enter while an in-band command holds the shell,
+Subject: [PATCH 43/54] Queue Enter while an in-band command holds the shell,
  in all its phases
 
 The queue only covered an active in-band block. Enter right after typing

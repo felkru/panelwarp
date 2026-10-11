@@ -1,7 +1,7 @@
 From e45f582addb5a02db402e66638caebf4afce0335 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 13:45:57 -0700
-Subject: [PATCH 06/53] wasm: let the host page hand the app URLs via
+Subject: [PATCH 06/54] wasm: let the host page hand the app URLs via
  window.warpOpenUrl
 
 Embedders can open warp:// links (e.g. warp://settings?widget=...) the way the OS does on

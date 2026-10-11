@@ -1,7 +1,7 @@
 From a25f74f23786a541838bbca756d4666e22ef636d Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 02:32:20 -0700
-Subject: [PATCH 34/53] Opt-in command history sync setting in embedded builds
+Subject: [PATCH 34/54] Opt-in command history sync setting in embedded builds
 
 Adds `host.history_sync` (off by default) and a "Sync command history" toggle on the Privacy
 page. The host app does the syncing: it shares the newest commands through VS Code Settings Sync

@@ -1,7 +1,7 @@
 From 3aae901711c0b06837e0c0e71dff3ab0594582c1 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 18:23:47 -0700
-Subject: [PATCH 22/53] Replace the tools panel with an Agents panel in
+Subject: [PATCH 22/54] Replace the tools panel with an Agents panel in
  embedded builds
 
 Lists the machine's recent Claude Code, Codex and Gemini CLI conversations

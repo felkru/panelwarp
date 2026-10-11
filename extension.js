@@ -532,6 +532,21 @@ function activate(context) {
     vscode.window.registerWebviewViewProvider('warp.view', provider, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
+    // The activity bar's Warp button: VS Code can only open a side bar view from there, so this
+    // one just shows the Warp panel and closes the side bar again.
+    vscode.window.registerWebviewViewProvider('warp.launcher', {
+      resolveWebviewView(view) {
+        view.webview.html = '<body></body>';
+        const showPanel = () => {
+          if (!view.visible) return;
+          vscode.commands.executeCommand('warp.view.focus');
+          vscode.commands.executeCommand('workbench.action.closeSidebar');
+        };
+        view.onDidChangeVisibility(showPanel);
+        showPanel();
+      },
+    }),
+    vscode.commands.registerCommand('warp.show', () => vscode.commands.executeCommand('warp.view.focus')),
     vscode.commands.registerCommand('warp.restart', () => provider.restart()),
     vscode.commands.registerCommand('warp.benchmarkCommandSearch', () => provider.ai.benchmark()),
     vscode.commands.registerCommand('warp.setOpenRouterApiKey', () =>

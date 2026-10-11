@@ -1,7 +1,7 @@
 From 0e88ba5a47fb4c08ffd6e51a6ab1f684bf3629d2 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Sun, 11 Oct 2026 10:29:01 -0700
-Subject: [PATCH 53/53] Agents panel: unread dots for conversations outside
+Subject: [PATCH 53/54] Agents panel: unread dots for conversations outside
  Warp
 
 The host now marks each conversation unread when its latest turn finished after it was

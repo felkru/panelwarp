@@ -1,7 +1,7 @@
 From b395ebfd885e369b8c7651909f84be9dab198dae Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 14:58:42 -0700
-Subject: [PATCH 39/53] Keep Warp's in-band commands out of fish history
+Subject: [PATCH 39/54] Keep Warp's in-band commands out of fish history
 
 Warp starts in-band commands in fish with a space, relying on fish leaving such commands out of
 history. Defining fish_should_add_to_history (which the bootstrap does) turns that rule off, so
