@@ -22,6 +22,9 @@ const MAX_CONVERSATIONS = 100;
 const SUMMARY_CHARS = 16000;
 // Session files can be tens of MB; only their ends are read.
 const HEAD_BYTES = 256 * 1024;
+// The head is read on to the end of its last line, so a first prompt with pasted images (several
+// MB on one line) isn't cut off, up to this much.
+const HEAD_MAX_BYTES = 16 * 1024 * 1024;
 const TAIL_BYTES = 2 * 1024 * 1024;
 // A Claude conversation opened in another folder's new window is handed off through globalState.
 const PENDING_OPEN_KEY = 'warp.pendingClaudeOpen';
@@ -45,10 +48,29 @@ function readRange(file, start, length) {
   }
 }
 
+/** Bytes from the start of `file` through the end of the line that crosses HEAD_BYTES. */
+function headLength(file, size) {
+  if (size <= HEAD_BYTES) return size;
+  const fd = fs.openSync(file, 'r');
+  try {
+    const chunk = Buffer.alloc(256 * 1024);
+    for (let pos = HEAD_BYTES; pos < Math.min(size, HEAD_MAX_BYTES); pos += chunk.length) {
+      const read = fs.readSync(fd, chunk, 0, chunk.length, pos);
+      const newline = chunk.subarray(0, read).indexOf(10);
+      if (newline >= 0) return pos + newline + 1;
+      if (read < chunk.length) return size;
+    }
+    return Math.min(size, HEAD_MAX_BYTES);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 /** Parsed JSON lines from the start (`head`) or end of a file; partial lines are dropped. */
 function jsonLines(file, size, which) {
-  const length = which === 'head' ? HEAD_BYTES : TAIL_BYTES;
+  let length = which === 'head' ? HEAD_BYTES : TAIL_BYTES;
   const start = which === 'head' ? 0 : Math.max(0, size - length);
+  if (which === 'head') length = headLength(file, size);
   let lines = readRange(file, start, Math.min(length, size)).split('\n');
   if (which === 'head' && size > length) lines.pop();
   if (which === 'tail' && start > 0) lines.shift();
@@ -122,7 +144,6 @@ const claude = {
       }
       if (cwd && firstPrompt) break;
     }
-    if (!firstPrompt) return null;
     let title = '';
     // When the latest turn ended (Claude writes `turn_duration` then), or 0 while one runs or
     // after it was interrupted.
@@ -142,6 +163,7 @@ const claude = {
         state = interrupted ? 'idle' : 'working';
       }
     }
+    if (!title && !firstPrompt) return null;
     return { id: path.basename(file, '.jsonl'), title: oneLine(title || firstPrompt), cwd, doneAt, state };
   },
 
