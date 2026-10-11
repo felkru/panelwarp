@@ -60,7 +60,8 @@
         {
           "type": "webview",
           "id": "warp.launcher",
-          "name": "Warp"
+          "name": "Warp",
+          "when": "!warp.inSideBar"
         }
       ]
     },
@@ -124,8 +125,44 @@
         "command": "warp.show",
         "title": "Show Panel",
         "category": "Warp"
+      },
+      {
+        "command": "warp.moveToSideBar",
+        "title": "Move to Side Bar",
+        "category": "Warp",
+        "icon": "$(layout-sidebar-left)"
+      },
+      {
+        "command": "warp.moveToPanel",
+        "title": "Move to Bottom Panel",
+        "category": "Warp",
+        "icon": "$(layout-panel)"
       }
-    ]
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "warp.moveToPanel",
+          "when": "view == warp.view && warp.inSideBar",
+          "group": "navigation"
+        },
+        {
+          "command": "warp.moveToSideBar",
+          "when": "view == warp.view && !warp.inSideBar",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "warp.moveToPanel",
+          "when": "warp.inSideBar"
+        },
+        {
+          "command": "warp.moveToSideBar",
+          "when": "!warp.inSideBar"
+        }
+      ]
+    }
   },
   "dependencies": {
     "node-pty": "^1.1.0",

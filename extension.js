@@ -90,6 +90,19 @@ async function externalUrl(url) {
   return ws ? mapped.replace(/^http/, 'ws') : mapped;
 }
 
+const IN_SIDE_BAR_KEY = 'warp.inSideBar';
+
+/** Moves the Warp view between the bottom panel and the activity bar's side bar container. */
+async function moveWarpView(context, toSideBar) {
+  await context.globalState.update(IN_SIDE_BAR_KEY, toSideBar);
+  await vscode.commands.executeCommand('setContext', IN_SIDE_BAR_KEY, toSideBar);
+  await vscode.commands.executeCommand('vscode.moveViews', {
+    viewIds: ['warp.view'],
+    destinationId: `workbench.view.extension.${toSideBar ? 'warp-launcher' : 'warp'}`,
+  });
+  await vscode.commands.executeCommand('warp.view.focus');
+}
+
 class WarpViewProvider {
   constructor(globalState, storageDir, log) {
     this.globalState = globalState;
@@ -526,26 +539,30 @@ function activate(context) {
     onApplied: () => provider.restart(),
     log,
   });
+  // VS Code remembers where views were moved (per profile); the context key hides the
+  // placeholder while Warp is in the side bar.
+  vscode.commands.executeCommand('setContext', IN_SIDE_BAR_KEY, context.globalState.get(IN_SIDE_BAR_KEY, false));
   context.subscriptions.push(
     log,
     provider,
     vscode.window.registerWebviewViewProvider('warp.view', provider, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
-    // The activity bar's Warp button: VS Code can only open a side bar view from there, so this
-    // one just shows the Warp panel and closes the side bar again.
+    // The activity bar's Warp button moves the Warp view itself (same tabs and shells) into
+    // its side bar container; the placeholder view only exists so the button shows while Warp
+    // is in the bottom panel, and hides once Warp is there.
     vscode.window.registerWebviewViewProvider('warp.launcher', {
       resolveWebviewView(view) {
         view.webview.html = '<body></body>';
-        const showPanel = () => {
-          if (!view.visible) return;
-          vscode.commands.executeCommand('warp.view.focus');
-          vscode.commands.executeCommand('workbench.action.closeSidebar');
+        const moveHere = () => {
+          if (view.visible) moveWarpView(context, true);
         };
-        view.onDidChangeVisibility(showPanel);
-        showPanel();
+        view.onDidChangeVisibility(moveHere);
+        moveHere();
       },
     }),
+    vscode.commands.registerCommand('warp.moveToSideBar', () => moveWarpView(context, true)),
+    vscode.commands.registerCommand('warp.moveToPanel', () => moveWarpView(context, false)),
     vscode.commands.registerCommand('warp.show', () => vscode.commands.executeCommand('warp.view.focus')),
     vscode.commands.registerCommand('warp.restart', () => provider.restart()),
     vscode.commands.registerCommand('warp.benchmarkCommandSearch', () => provider.ai.benchmark()),
