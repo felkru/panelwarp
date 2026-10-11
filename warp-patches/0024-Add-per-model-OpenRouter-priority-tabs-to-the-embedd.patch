@@ -1,7 +1,7 @@
 From 72012ed642f9db380acbe55abd9d90d574015094 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 18:28:54 -0700
-Subject: [PATCH 24/52] Add per-model OpenRouter priority tabs to the embedded
+Subject: [PATCH 24/53] Add per-model OpenRouter priority tabs to the embedded
  AI settings
 
 A Balanced / Latency / Cost / Throughput segmented control under the fast

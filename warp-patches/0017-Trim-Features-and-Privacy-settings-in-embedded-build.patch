@@ -1,7 +1,7 @@
 From 2c9702e5bc5e36d5ef09641f34d289bf1f884f8f Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 16:16:55 -0700
-Subject: [PATCH 17/52] Trim Features and Privacy settings in embedded builds
+Subject: [PATCH 17/53] Trim Features and Privacy settings in embedded builds
 
 Telemetry and crash reports are forced off. The Privacy page keeps only
 secret redaction. Features drops the agent bar, default mode, changelog,

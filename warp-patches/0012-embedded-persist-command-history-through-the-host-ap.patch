@@ -1,7 +1,7 @@
 From 61acc084b84b89546dcc30d5e3c9f1cb610bae33 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 14:10:43 -0700
-Subject: [PATCH 12/52] embedded: persist command history through the host app
+Subject: [PATCH 12/53] embedded: persist command history through the host app
 
 The web build has no local database, so command metadata (exit code, times, cwd, git branch,
 shell/host) went nowhere and was lost on reload. Embedded builds now report started/finished

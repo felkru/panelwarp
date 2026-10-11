@@ -1,0 +1,237 @@
+From 0e88ba5a47fb4c08ffd6e51a6ab1f684bf3629d2 Mon Sep 17 00:00:00 2001
+From: Felix Krueckel <hi@felkru.com>
+Date: Sun, 11 Oct 2026 10:29:01 -0700
+Subject: [PATCH 53/53] Agents panel: unread dots for conversations outside
+ Warp
+
+The host now marks each conversation unread when its latest turn finished after it was
+last seen (from the agent's session file); the panel shows that dot for conversations not
+running in a Warp pane, reloads the list every 4 s (keeping the hover), clears the dot on
+open, and tells the host when Warp has seen one that runs in its own pane.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/platform/wasm.rs                      |  12 +-
+ app/src/workspace/view/agent_conversations.rs | 109 ++++++++++++++----
+ 2 files changed, 98 insertions(+), 23 deletions(-)
+
+diff --git a/app/src/platform/wasm.rs b/app/src/platform/wasm.rs
+index 503c8a8..5e6d13f 100644
+--- a/app/src/platform/wasm.rs
++++ b/app/src/platform/wasm.rs
+@@ -84,6 +84,9 @@ mod ffi {
+         #[wasm_bindgen(js_name = "warpPanelOpenAgentConversation", catch)]
+         pub fn open_agent_conversation(agent: &str, id: &str) -> Result<js_sys::Promise, JsValue>;
+ 
++        #[wasm_bindgen(js_name = "warpPanelAgentConversationSeen", catch)]
++        pub fn agent_conversation_seen(agent: &str, id: &str) -> Result<(), JsValue>;
++
+         #[wasm_bindgen(js_name = "warpPanelResolvePaths", catch)]
+         pub fn resolve_paths(cwd: &str, candidates_json: &str) -> Result<js_sys::Promise, JsValue>;
+ 
+@@ -101,7 +104,8 @@ mod ffi {
+ 
+ /// Lists recent coding-agent conversations (Claude Code, Codex, Gemini CLI) from anywhere on the
+ /// machine via the host's `window.warpPanelAgentConversations()`, which resolves to a JSON array
+-/// of `{agent, id, title, cwd, updatedAt}` (`updatedAt` in milliseconds since the epoch).
++/// of `{agent, id, title, cwd, updatedAt, unread}` (`updatedAt` in milliseconds since the epoch;
++/// `unread`: its latest turn finished after it was last seen).
+ /// Resolves to None if the host doesn't provide it or fails.
+ pub async fn agent_conversations_from_host() -> Option<String> {
+     let promise = ffi::agent_conversations().ok()?;
+@@ -155,6 +159,12 @@ pub fn agent_conversation_summary_from_host(
+ /// Asks the host to open a coding-agent conversation. Claude Code conversations open in the host
+ /// (VS Code: the Claude Code extension's editor tab) and this resolves to None; for agents that
+ /// resume in a terminal it resolves to the command to run in a new Warp tab.
++/// Tells the host a conversation was seen in the Warp pane it runs in, so the host's own unread
++/// state for it (from the agent's session file) is cleared too.
++pub fn agent_conversation_seen_in_host(agent: &str, id: &str) {
++    let _ = ffi::agent_conversation_seen(agent, id);
++}
++
+ pub async fn open_agent_conversation_in_host(agent: &str, id: &str) -> Option<String> {
+     let promise = ffi::open_agent_conversation(agent, id).ok()?;
+     wasm_bindgen_futures::JsFuture::from(promise)
+diff --git a/app/src/workspace/view/agent_conversations.rs b/app/src/workspace/view/agent_conversations.rs
+index bb09c34..7e0ad10 100644
+--- a/app/src/workspace/view/agent_conversations.rs
++++ b/app/src/workspace/view/agent_conversations.rs
+@@ -2,9 +2,11 @@
+ //! (Claude Code, Codex, Gemini CLI) from anywhere on the machine, as listed by the embedding host
+ //! (the VS Code panel). Hovering a row streams a short AI summary of it from the host; clicking
+ //! opens it in the host (Claude Code) or resumes it in a new tab (agents that run in a terminal).
+-//! A conversation running in one of Warp's own tabs gets the same unread dot as that tab in the
+-//! vertical tabs (it finished or needs input while you weren't looking), and clicking it goes to
+-//! that tab.
++//! A conversation gets a blue unread dot when its latest turn finished while you weren't looking:
++//! for one running in one of Warp's own tabs, the same dot as that tab in the vertical tabs
++//! (clicking it goes to that tab); for one elsewhere (the Claude Code extension, another
++//! terminal), the host's state from the agent's session file, which it clears once you open the
++//! conversation. The list is reloaded every few seconds so the dots stay current.
+ 
+ use std::collections::HashMap;
+ use std::ops::Range;
+@@ -39,6 +41,9 @@ use crate::workspace::tab_settings::TabSettings;
+ /// How long the pointer has to rest on a row before its summary is requested, so sweeping over
+ /// the list doesn't start a request per row.
+ const SUMMARY_HOVER_DELAY: Duration = Duration::from_millis(450);
++/// How often the list is reloaded from the host once it's been shown.
++#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
++const REFRESH_INTERVAL: Duration = Duration::from_secs(4);
+ const ICON_SIZE: f32 = 16.;
+ const ICON_SPACING: f32 = 8.;
+ const SUMMARY_MAX_WIDTH: f32 = 360.;
+@@ -53,6 +58,9 @@ struct HostAgentConversation {
+     cwd: Option<String>,
+     /// Milliseconds since the epoch.
+     updated_at: f64,
++    /// Its latest turn finished after it was last seen, per the host.
++    #[serde(default)]
++    unread: bool,
+ }
+ 
+ impl HostAgentConversation {
+@@ -97,6 +105,9 @@ pub struct AgentConversationsView {
+     hovered_index: Option<usize>,
+     summaries: HashMap<String, Summary>,
+     hover_delay: Option<SpawnedFutureHandle>,
++    /// The host's last answer, to skip redrawing when nothing changed.
++    last_json: Option<String>,
++    refresh_timer: Option<SpawnedFutureHandle>,
+ }
+ 
+ impl AgentConversationsView {
+@@ -127,40 +138,87 @@ impl AgentConversationsView {
+             hovered_index: None,
+             summaries: HashMap::new(),
+             hover_delay: None,
++            last_json: None,
++            refresh_timer: None,
+         }
+     }
+ 
+-    /// Reloads the list from the host.
++    /// Reloads the list from the host, then again every few seconds.
+     pub fn refresh(&mut self, ctx: &mut ViewContext<Self>) {
+         #[cfg(target_family = "wasm")]
+-        ctx.spawn(
+-            crate::platform::wasm::agent_conversations_from_host(),
+-            |me, json, ctx| {
+-                let conversations = json
+-                    .and_then(|json| {
+-                        serde_json::from_str::<Vec<HostAgentConversation>>(&json)
+-                            .inspect_err(|err| log::warn!("Bad agent conversation list: {err}"))
+-                            .ok()
+-                    })
+-                    .unwrap_or_default();
+-                me.set_conversations(conversations, ctx);
+-            },
+-        );
++        {
++            if let Some(timer) = self.refresh_timer.take() {
++                timer.abort();
++            }
++            ctx.spawn(
++                crate::platform::wasm::agent_conversations_from_host(),
++                |me, json, ctx| {
++                    if json.is_some() && json == me.last_json {
++                        me.schedule_refresh(ctx);
++                        return;
++                    }
++                    let conversations = json
++                        .as_deref()
++                        .and_then(|json| {
++                            serde_json::from_str::<Vec<HostAgentConversation>>(json)
++                                .inspect_err(|err| log::warn!("Bad agent conversation list: {err}"))
++                                .ok()
++                        })
++                        .unwrap_or_default();
++                    me.last_json = json;
++                    me.set_conversations(conversations, ctx);
++                    me.schedule_refresh(ctx);
++                },
++            );
++        }
+         #[cfg(not(target_family = "wasm"))]
+         self.set_conversations(Vec::new(), ctx);
+     }
+ 
++    #[cfg(target_family = "wasm")]
++    fn schedule_refresh(&mut self, ctx: &mut ViewContext<Self>) {
++        self.refresh_timer = Some(ctx.spawn(Timer::after(REFRESH_INTERVAL), |me, _, ctx| {
++            me.refresh_timer = None;
++            me.refresh(ctx);
++        }));
++    }
++
+     fn set_conversations(
+         &mut self,
+-        conversations: Vec<HostAgentConversation>,
++        mut conversations: Vec<HostAgentConversation>,
+         ctx: &mut ViewContext<Self>,
+     ) {
++        // A conversation running in a Warp pane that Warp considers seen is seen for the host too.
++        let warp_panes = warp_panes(ctx);
++        for conversation in &mut conversations {
++            let pane = warp_panes.get(&(conversation.agent.as_str(), conversation.id.as_str()));
++            if conversation.unread && pane.is_some_and(|pane| !pane.unread) {
++                conversation.unread = false;
++                #[cfg(target_family = "wasm")]
++                crate::platform::wasm::agent_conversation_seen_in_host(
++                    &conversation.agent,
++                    &conversation.id,
++                );
++            }
++        }
++        // Keep the hover (and its summary) when the hovered row is still the same conversation.
++        let hovered = self
++            .hovered_index
++            .and_then(|index| self.conversations.get(index))
++            .map(|conversation| (conversation.agent.clone(), conversation.id.clone()));
++        let hovered_index = hovered.and_then(|(agent, id)| {
++            conversations
++                .iter()
++                .position(|conversation| conversation.agent == agent && conversation.id == id)
++        });
+         self.row_states
+             .resize_with(conversations.len(), MouseStateHandle::default);
+         self.conversations = conversations;
+         self.loaded = true;
+-        self.hovered_index = None;
+-        self.cancel_hover_delay();
++        if hovered_index != self.hovered_index {
++            self.hovered_index = None;
++            self.cancel_hover_delay();
++        }
+         ctx.notify();
+     }
+ 
+@@ -243,9 +301,15 @@ impl AgentConversationsView {
+     }
+ 
+     fn open(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+-        let Some(conversation) = self.conversations.get(index) else {
++        let Some(conversation) = self.conversations.get_mut(index) else {
+             return;
+         };
++        // Opening it is seeing it; the host records that too.
++        if conversation.unread {
++            conversation.unread = false;
++            ctx.notify();
++        }
++        let conversation = &self.conversations[index];
+         if let Some(pane) =
+             warp_panes(ctx).get(&(conversation.agent.as_str(), conversation.id.as_str()))
+         {
+@@ -567,9 +631,10 @@ impl View for AgentConversationsView {
+             self.conversations
+                 .iter()
+                 .map(|conversation| {
++                    // Warp tracks the ones in its own panes; the host the rest.
+                     warp_panes
+                         .get(&(conversation.agent.as_str(), conversation.id.as_str()))
+-                        .is_some_and(|pane| pane.unread)
++                        .map_or(conversation.unread, |pane| pane.unread)
+                 })
+                 .collect()
+         };

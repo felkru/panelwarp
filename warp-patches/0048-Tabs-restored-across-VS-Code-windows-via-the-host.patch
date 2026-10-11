@@ -1,7 +1,7 @@
 From fe8ed4f04bcd6f0cac4c921bb967c2830e1bd565 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Fri, 9 Oct 2026 00:22:02 -0700
-Subject: [PATCH 48/52] Tabs restored across VS Code windows via the host
+Subject: [PATCH 48/53] Tabs restored across VS Code windows via the host
 
 On the web, Warp's session restoration has no SQLite, so the layout (tabs,
 splits, titles, each pane's directory) and finished blocks go to the host

@@ -366,6 +366,9 @@
       // Calls onText with the summary so far; rejects with an error message.
       window.warpPanelAgentConversationSummary = (agent, id, onText) =>
         agentsRequest({ type: 'warp-agents-summary', agent: String(agent), sessionId: String(id) }, 60000, onText);
+      // A conversation running in a Warp pane was seen there (its unread dot is Warp's own).
+      window.warpPanelAgentConversationSeen = (agent, id) =>
+        toExtension({ type: 'warp-agents-seen', agent: String(agent), sessionId: String(id) });
       // Resolves to undefined if VS Code opened it, or a command for Warp to run in a new tab.
       window.warpPanelOpenAgentConversation = (agent, id) =>
         agentsRequest({ type: 'warp-agents-open', agent: String(agent), sessionId: String(id) }, 30000);

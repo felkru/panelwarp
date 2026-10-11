@@ -1,7 +1,7 @@
 From 10d2c036d6c322dee961057863b52303d8d995d1 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 16:16:55 -0700
-Subject: [PATCH 16/52] One AI settings page and a short sidebar in embedded
+Subject: [PATCH 16/53] One AI settings page and a short sidebar in embedded
  builds
 
 The AI page holds the OpenRouter provider, # command search, suggestions

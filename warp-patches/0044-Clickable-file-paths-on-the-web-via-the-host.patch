@@ -1,7 +1,7 @@
 From 0c6460739f4f4d24ad3a94628f7909e38ee26b12 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 15:41:03 -0700
-Subject: [PATCH 44/52] Clickable file paths on the web via the host
+Subject: [PATCH 44/53] Clickable file paths on the web via the host
 
 The web build has no filesystem, so link detection sends the possible paths under
 the mouse to the host (the VS Code extension), which stats them; Cmd-click and the

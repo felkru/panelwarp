@@ -1,7 +1,7 @@
 From 3df6258ff7e4ad4d14329ccaf352116252091aaa Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Sat, 10 Oct 2026 01:01:05 -0700
-Subject: [PATCH 50/52] Close a tab when its shell exits in embedded builds
+Subject: [PATCH 50/53] Close a tab when its shell exits in embedded builds
 
 The web event loop now ends the terminal model when the PTY host reports the shell exited, as
 desktop does for a local shell, so `exit` closes the pane. The embedded app has no window to

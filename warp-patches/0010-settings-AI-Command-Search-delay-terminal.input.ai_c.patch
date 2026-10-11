@@ -1,7 +1,7 @@
 From cbfe0f10c261a86093d41d18e048a5b8f1006025 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 13:54:27 -0700
-Subject: [PATCH 10/52] settings: AI Command Search delay
+Subject: [PATCH 10/53] settings: AI Command Search delay
  (terminal.input.ai_command_search_debounce_ms)
 
 Dropdown under the '#' toggle (50/200/400/800/1500 ms). Defaults to 400 ms in embedded builds,

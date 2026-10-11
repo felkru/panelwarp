@@ -1,7 +1,7 @@
 From c6f6fa577ee66859b839dc2b594f91d2162825c3 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 13:46:41 -0700
-Subject: [PATCH 09/52] embedded: build the API key row after the page's
+Subject: [PATCH 09/53] embedded: build the API key row after the page's
  immutable settings borrow
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

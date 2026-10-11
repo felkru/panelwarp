@@ -26,6 +26,10 @@ const TAIL_BYTES = 2 * 1024 * 1024;
 // A Claude conversation opened in another folder's new window is handed off through globalState.
 const PENDING_OPEN_KEY = 'warp.pendingClaudeOpen';
 const PENDING_OPEN_MAX_AGE = 2 * 60 * 1000;
+// When each conversation was last seen (agent:id -> ms), shared by all windows, and when this
+// tracking started: turns that finished earlier count as seen.
+const SEEN_KEY = 'warp.agentsSeen';
+const SEEN_SINCE_KEY = 'warp.agentsSeenSince';
 
 function readRange(file, start, length) {
   const fd = fs.openSync(file, 'r');
@@ -117,11 +121,19 @@ const claude = {
     }
     if (!firstPrompt) return null;
     let title = '';
+    // When the latest turn ended (Claude writes `turn_duration` then), or 0 while one runs.
+    let doneAt = 0;
     for (const entry of jsonLines(file, size, 'tail')) {
       if (entry.type === 'ai-title' && entry.aiTitle) title = entry.aiTitle;
       else if (entry.type === 'summary' && entry.summary && !title) title = entry.summary;
+      if (entry.isSidechain) continue;
+      if (entry.type === 'system' && entry.subtype === 'turn_duration') {
+        doneAt = Date.parse(entry.timestamp) || 0;
+      } else if ((entry.type === 'user' && !entry.isMeta) || entry.type === 'assistant') {
+        doneAt = 0;
+      }
     }
-    return { id: path.basename(file, '.jsonl'), title: oneLine(title || firstPrompt), cwd };
+    return { id: path.basename(file, '.jsonl'), title: oneLine(title || firstPrompt), cwd, doneAt };
   },
 
   /** [{role, text}] of the conversation's end. */
@@ -164,7 +176,13 @@ const codex = {
     }
     id ||= path.basename(file, '.jsonl').match(/([0-9a-f]{8}-[0-9a-f-]{27})$/i)?.[1] || '';
     if (!id || !firstPrompt) return null;
-    return { id, title: oneLine(firstPrompt), cwd };
+    let doneAt = 0;
+    for (const entry of jsonLines(file, size, 'tail')) {
+      const event = entry.type === 'event_msg' ? entry.payload?.type : null;
+      if (event === 'task_complete') doneAt = Date.parse(entry.timestamp) || 0;
+      else if (event === 'task_started' || event === 'user_message') doneAt = 0;
+    }
+    return { id, title: oneLine(firstPrompt), cwd, doneAt };
   },
 
   transcript: ({ file, size }) => jsonLines(file, size, 'tail').map(codexMessage).filter(Boolean),
@@ -193,7 +211,10 @@ const gemini = {
     if (!chat.sessionId || !firstPrompt) return null;
     // Gemini only stores a hash of the project root; match it against folders we know.
     const hash = chat.projectHash || path.basename(path.dirname(path.dirname(entry.file)));
-    return { id: chat.sessionId, title: oneLine(firstPrompt), cwd: projectRoots.get(hash) || '' };
+    // Gemini writes the file once a reply is complete, so an answered last prompt is a done turn.
+    const last = (chat.messages || []).filter((m) => m.type === 'user' || m.type === 'gemini').at(-1);
+    const doneAt = last?.type === 'gemini' ? Date.parse(last.timestamp || chat.lastUpdated) || entry.mtimeMs : 0;
+    return { id: chat.sessionId, title: oneLine(firstPrompt), cwd: projectRoots.get(hash) || '', doneAt };
   },
 
   transcript: (entry) => gemini.read(entry).turns,
@@ -248,7 +269,63 @@ class AgentConversations {
     }
     if (this.parsed.size > 2000) this.parsed.clear();
     conversations.sort((a, b) => b.updatedAt - a.updatedAt);
-    return JSON.stringify(conversations.slice(0, MAX_CONVERSATIONS));
+    const listed = conversations.slice(0, MAX_CONVERSATIONS);
+    this.markVisibleClaudeTabsSeen(listed);
+    const seen = this.globalState.get(SEEN_KEY) || {};
+    const since = this.seenSince();
+    return JSON.stringify(
+      listed.map(({ doneAt, ...conversation }) => ({
+        ...conversation,
+        // Its latest turn finished after you last looked at it (here or in its Claude tab).
+        unread: doneAt > Math.max(since, seen[`${conversation.agent}:${conversation.id}`] || 0),
+      })),
+    );
+  }
+
+  seenSince() {
+    let since = this.globalState.get(SEEN_SINCE_KEY);
+    if (!since) {
+      since = Date.now();
+      this.globalState.update(SEEN_SINCE_KEY, since);
+    }
+    return since;
+  }
+
+  /** Records that a conversation was seen now (clicked in the Agents panel, its tab in front). */
+  markSeen(agent, id) {
+    const seen = { ...(this.globalState.get(SEEN_KEY) || {}) };
+    seen[`${agent}:${id}`] = Date.now();
+    // Only conversations that can still be listed.
+    const keys = Object.keys(seen);
+    if (keys.length > MAX_CONVERSATIONS * 3) {
+      for (const key of keys.sort((a, b) => seen[a] - seen[b]).slice(0, keys.length - MAX_CONVERSATIONS * 2)) {
+        delete seen[key];
+      }
+    }
+    this.globalState.update(SEEN_KEY, seen);
+  }
+
+  /**
+   * A Claude Code conversation shown in front in a Claude editor tab of this focused window is
+   * seen. The tab is matched by its title, the only thing VS Code tells us about another
+   * extension's webview.
+   */
+  markVisibleClaudeTabsSeen(conversations) {
+    if (!vscode.window.state.focused) return;
+    const labels = vscode.window.tabGroups.all
+      .map((group) => group.activeTab)
+      .filter((tab) => tab?.input instanceof vscode.TabInputWebview && /claudeVSCodePanel$/.test(tab.input.viewType))
+      .map((tab) => normalizeTitle(tab.label))
+      .filter(Boolean);
+    if (!labels.length) return;
+    for (const conversation of conversations) {
+      if (conversation.agent !== 'claude' || !conversation.doneAt) continue;
+      const title = normalizeTitle(conversation.title);
+      if (labels.some((label) => title.startsWith(label) || label.startsWith(title))) {
+        const seen = this.globalState.get(SEEN_KEY) || {};
+        if ((seen[`claude:${conversation.id}`] || 0) < conversation.doneAt) this.markSeen('claude', conversation.id);
+      }
+    }
   }
 
   entry(agent, id) {
@@ -364,6 +441,7 @@ class AgentConversations {
    */
   async open(agent, id) {
     const entry = this.entry(agent, id);
+    this.markSeen(agent, id);
     const parsed = this.parsed.get(`${entry.file}\0${entry.mtimeMs}`) || AGENTS[agent].parse(entry, new Map());
     const cwd = parsed?.cwd || '';
     const cd = cwd && fs.existsSync(cwd) ? `cd ${shellQuote(cwd)} && ` : '';
@@ -406,6 +484,12 @@ async function openPendingClaudeConversation(globalState, log) {
   } catch (error) {
     log.appendLine(`agents: could not open Claude conversation: ${error.message}`);
   }
+}
+
+/** A title for matching tab labels: one line, no ellipsis, at least a few characters. */
+function normalizeTitle(text) {
+  const title = String(text || '').replace(/\s+/g, ' ').replace(/(…|\.\.\.)$/, '').trim().toLowerCase();
+  return title.length >= 4 ? title : '';
 }
 
 const shellQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;

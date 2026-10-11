@@ -1,7 +1,7 @@
 From 367f854c120a791a181da26120f47c8439eea774 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 14:53:51 -0700
-Subject: [PATCH 38/52] Run bash and fish over the remote PTY, and answer the
+Subject: [PATCH 38/53] Run bash and fish over the remote PTY, and answer the
  shell's terminal queries
 
 The host app names its shell in the session endpoint (`shell=bash`); remote_tty uses it for the

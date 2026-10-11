@@ -1,7 +1,7 @@
 From dd7f21509fdcd43b7ebac6410b6ebe3ff9296460 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 21:08:30 -0700
-Subject: [PATCH 25/52] Add wasm-fast and wasm-thin profiles and a bundle
+Subject: [PATCH 25/53] Add wasm-fast and wasm-thin profiles and a bundle
  --profile flag
 
 wasm-fast (no LTO, incremental) cuts a one-file edit build from ~9 min to ~20 s;

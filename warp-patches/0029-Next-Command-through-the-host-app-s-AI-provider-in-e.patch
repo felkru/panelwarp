@@ -1,7 +1,7 @@
 From 547a723795207913ee9876f6e49a08996f1e85c1 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 01:30:24 -0700
-Subject: [PATCH 29/52] Next Command through the host app's AI provider in
+Subject: [PATCH 29/53] Next Command through the host app's AI provider in
  embedded builds
 
 Embedded (remote_tty) builds have no Warp AI, so Next Command now asks the

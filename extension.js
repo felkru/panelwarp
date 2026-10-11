@@ -226,6 +226,9 @@ class WarpViewProvider {
           this.post({ type: 'warp-ai-result', id: msg.id, error: error.code || 'other' });
         }
         break;
+      case 'warp-agents-seen':
+        this.agents.markSeen(String(msg.agent), String(msg.sessionId));
+        break;
       case 'warp-agents-list':
       case 'warp-agents-summary':
       case 'warp-agents-open': {
@@ -452,6 +455,7 @@ function webviewHtml(server, keys) {
       'warp-ai-next-command',
       'warp-ai-prompt-suggestion',
       'warp-agents-list',
+      'warp-agents-seen',
       'warp-agents-summary',
       'warp-agents-open',
       'warp-routed-key',
