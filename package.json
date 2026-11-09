@@ -124,6 +124,16 @@
         "category": "Warp"
       },
       {
+        "command": "warp.openSettingsFile",
+        "title": "Open Settings File",
+        "category": "Warp"
+      },
+      {
+        "command": "warp.openKeybindingsFile",
+        "title": "Open Keybindings File",
+        "category": "Warp"
+      },
+      {
         "command": "warp.setOpenRouterApiKey",
         "title": "Set OpenRouter API Key",
         "category": "Warp"
@@ -243,10 +253,13 @@
       }
     ]
   },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
   "dependencies": {
     "node-pty": "^1.1.0",
     "smol-toml": "^1.9.0",
     "ws": "^8.18.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.6"
   }
 }

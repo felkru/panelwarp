@@ -1,0 +1,152 @@
+From 7a3b51ff17f91f027c5e288ca7e6b888d6ef2bd4 Mon Sep 17 00:00:00 2001
+From: Alex Brodsky <122503996+Albro3459@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 12:30:32 -0600
+Subject: [PATCH] Reload settings and keybindings when the web host asks
+
+Desktop Warp applies settings.toml edits while it runs, but the web
+build only reads localStorage at startup, so an embedding host that
+changed settings or keybindings had to reload the page (in VS Code,
+restarting the panel).
+
+Embedded builds now expose window.warpPanelReloadSettings(). It reloads
+every setting from storage, like desktop's hot reload but by storage
+key (reload_all_public_settings reads TOML keys, which the web build
+doesn't use), then replaces the custom keybindings with the stored ones
+and emits KeybindingChangedEvent so views showing keys update. The
+Features page's Tab key behavior dropdown still shows the old value
+until the page is opened again.
+
+Built for wasm (wasm-fast) and tested in a browser: changed keybindings
+and font size applied after warpPanelReloadSettings() without a reload.
+---
+ app/src/keyboard.rs      | 40 +++++++++++++++++++++++++++++
+ app/src/lib.rs           |  2 ++
+ app/src/platform/wasm.rs | 54 ++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 96 insertions(+)
+
+diff --git a/app/src/keyboard.rs b/app/src/keyboard.rs
+index b638e366d..94c6d353f 100644
+--- a/app/src/keyboard.rs
++++ b/app/src/keyboard.rs
+@@ -62,6 +62,46 @@ pub fn load_custom_keybindings(app: &mut AppContext) {
+     }
+ }
+ 
++/// Replaces the custom keybindings with the stored ones while the app runs, e.g. after the web host
++/// changed them. Bindings that are no longer stored go back to their defaults.
++#[cfg(all(not(test), target_family = "wasm"))]
++pub fn reload_custom_keybindings(app: &mut AppContext) {
++    use warpui::SingletonEntity as _;
++
++    use crate::settings_view::keybindings::{KeybindingChangedEvent, KeybindingChangedNotifier};
++    use crate::util::bindings::trigger_to_keystroke;
++
++    let previous: Vec<&'static str> = app
++        .editable_bindings()
++        .filter(|binding| binding.original_trigger.is_some())
++        .map(|binding| binding.name)
++        .collect();
++    for &name in &previous {
++        app.remove_custom_trigger(name);
++    }
++    let stored = read_custom_keybindings().unwrap_or_default().0;
++    load_custom_keybindings(app);
++
++    // Views that show a binding's keys only update on this event
++    let names = previous
++        .into_iter()
++        .map(str::to_owned)
++        .chain(stored.into_keys())
++        .unique();
++    for binding_name in names {
++        let new_trigger = app
++            .editable_bindings()
++            .find(|binding| binding.name == binding_name)
++            .and_then(|binding| trigger_to_keystroke(binding.trigger));
++        KeybindingChangedNotifier::handle(app).update(app, |_, ctx| {
++            ctx.emit(KeybindingChangedEvent::BindingChanged {
++                binding_name,
++                new_trigger,
++            })
++        });
++    }
++}
++
+ /// Write a new custom keybinding to disk
+ /// using the name of the editable binding and the new keystrokes
+ /// if keystrokes is UserDefinedKeybinding::Removed
+diff --git a/app/src/lib.rs b/app/src/lib.rs
+index c8bcf5455..fe81ff715 100644
+--- a/app/src/lib.rs
++++ b/app/src/lib.rs
+@@ -2091,6 +2091,8 @@ pub(crate) fn initialize_app(
+     ctx.add_singleton_model(move |_| History::new(command_history));
+     #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
+     ctx.add_singleton_model(crate::platform::wasm::host_session::Autosave::new);
++    #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
++    ctx.add_singleton_model(crate::platform::wasm::host_settings::Reload::new);
+ 
+     ctx.add_singleton_model(CustomSecretRegexUpdater::new);
+ 
+diff --git a/app/src/platform/wasm.rs b/app/src/platform/wasm.rs
+index 682aa36f5..7653e38c4 100644
+--- a/app/src/platform/wasm.rs
++++ b/app/src/platform/wasm.rs
+@@ -879,3 +879,57 @@ pub mod host_session {
+         }
+     }
+ }
++
++/// Re-reads settings and keybindings from localStorage when the host calls
++/// `window.warpPanelReloadSettings()` after changing them (e.g. the user edited the panel's
++/// settings.toml), so they apply without reloading the page.
++#[cfg(feature = "remote_tty")]
++pub mod host_settings {
++    use settings::SettingsManager;
++    use warpui::{AppContext, SingletonEntity as _};
++    use wasm_bindgen::closure::Closure;
++
++    pub struct Reload;
++
++    impl Reload {
++        pub fn new(ctx: &mut warpui::ModelContext<Self>) -> Self {
++            let (tx, rx) = futures::channel::mpsc::unbounded::<()>();
++            let reload = Closure::<dyn Fn()>::new(move || {
++                let _ = tx.unbounded_send(());
++            });
++            let _ = js_sys::Reflect::set(
++                &gloo::utils::window(),
++                &"warpPanelReloadSettings".into(),
++                reload.as_ref(),
++            );
++            // The hook lives for the lifetime of the page.
++            reload.forget();
++            ctx.spawn_stream_local(rx, |_, (), ctx| reload_all(ctx), |_, _| {});
++            Self
++        }
++    }
++
++    /// Like desktop's settings.toml hot reload (`reload_all_public_settings`), which reads TOML
++    /// keys; the web build stores settings under their storage keys.
++    fn reload_all(ctx: &mut AppContext) {
++        SettingsManager::handle(ctx).update(ctx, |manager, ctx| {
++            let defaults: Vec<(String, String)> = manager.default_values().collect();
++            for (key, default) in defaults {
++                let (value, explicitly_set) = match manager.read_local_setting_value(&key, ctx) {
++                    Ok(Some(value)) => (value, true),
++                    _ => (default, false),
++                };
++                if let Err(err) = manager.load_setting(&key, value, explicitly_set, ctx) {
++                    log::warn!("Failed to reload setting {key}: {err}");
++                }
++            }
++        });
++        crate::keyboard::reload_custom_keybindings(ctx);
++    }
++
++    impl warpui::Entity for Reload {
++        type Event = ();
++    }
++
++    impl warpui::SingletonEntity for Reload {}
++}

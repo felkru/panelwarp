@@ -1,0 +1,137 @@
+From a0194bbc6212c7d8e3d0802c6c5b568b7eaee9ad Mon Sep 17 00:00:00 2001
+From: "Tianyu (Sky) Lu" <tianyu@lu.fm>
+Date: Wed, 28 Oct 2026 17:24:55 -0400
+Subject: [PATCH] Fix Tab key behavior always detected as user defined (#16529)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+## Description
+
+Closes #16526
+
+`FeaturesPageView::refresh_tab_behavior_state` uppercased the displayed
+keystroke before comparing it to `TAB_KEYSTROKE_STR` (`"Tab"`).
+`Keystroke::displayed()` renders the Tab key as `"Tab"`, so the
+comparison was effectively `"TAB" == "Tab"` and never matched; the Tab
+key behavior always resolved to `TabBehavior::UserDefined`. As a result,
+the hint line under the "Tab key behavior" dropdown disappeared right
+after choosing an option, and the dropdown showed "User defined" once
+the Features page was refreshed (e.g. after switching away and back).
+
+This PR drops the two `.to_uppercase()` calls so the detection compares
+the displayed keystroke directly, matching what
+`set_tab_behavior_setting` in the same file already does. The
+keybindings themselves were always applied correctly; only the detection
+changes. No rendered strings change.
+
+## Linked Issue
+
+#16526 (triaged, `repro:high`, `factory-auto-implement`; not yet labeled
+`ready-to-implement`)
+
+- [ ] The linked issue is labeled `ready-to-spec` or
+`ready-to-implement`.
+- [x] Where appropriate, screenshots or a short video of the
+implementation are included below (especially for user-visible or UI
+changes).
+
+## Testing
+
+- `cargo check -p warp` passes.
+- Manually tested with `./script/run`:
+1. Settings > Features > Tab key behavior: Select "Open completions
+menu". The dropdown shows "Open completions menu" and the hint line
+shows "→ accepts autosuggestions.".
+2. Select "Accept autosuggestion". The hint line shows "Ctrl Space opens
+completion menu.".
+3. Switch to another settings page and back. The dropdown still shows
+"Accept autosuggestion".
+4. Settings > Keyboard shortcuts: Select "Accept Autosuggestion", change
+to any key except Tab (e.g. "Ctrl Shift Space"). Switch back to Settings
+> Features. The dropdown now shows "User defined" and the hint line is
+hided.
+
+- [x] I have manually tested my changes locally with `./script/run`
+
+### Screenshots / Videos
+#### Before Fix
+##### macOS
+https://youtu.be/PvY3TiDureM
+
+##### Linux
+https://youtu.be/YmyC8dAMOw0
+
+#### After Fix
+https://youtu.be/JDSSg4HVlIE
+
+_Note: I don't have Xcode on my macOS so I tested on Linux._
+
+## Agent Mode
+- [ ] Warp Agent Mode - This PR was created via Warp's AI Agent Mode
+
+## Changelog Entries for Stable
+
+CHANGELOG-BUG-FIX: The "Tab key behavior" setting no longer shows "User
+defined" when Tab is bound to opening completions or accepting
+autosuggestions.
+
+<!--
+## Changelog Entries for Stable
+
+The entries below will be used when constructing a soft-copy of the
+stable release changelog. Leave blank or remove the lines if no entry in
+the stable changelog is needed. Entries should be on the same line,
+without the `{{` `}}` brackets. You can use multiple lines, even of the
+same type. The valid suffixes are:
+
+- NEW-FEATURE: for new, relatively sizable features. Features listed
+here will likely have docs / social media posts / marketing launches
+associated with them, so use sparingly.
+- IMPROVEMENT: for new functionality of existing features.
+- BUG-FIX: for fixes related to known bugs or regressions.
+- IMAGE: the image specified by the URL (hosted on GCP) will be added to
+Dev & Preview releases. For Stable releases, see the pinned doc in the
+#release Slack channel.
+- OZ: Oz-related updates. Use `CHANGELOG-OZ`. At most 4 Oz updates are
+shown in-app per release.
+- TUI: updates that impact Warp Agent CLI users, including shared Agent
+capabilities. Use `CHANGELOG-TUI` for text that should appear in the TUI
+zero state. It may be used alongside another changelog entry when a
+change affects multiple surfaces.
+- NONE: Explicitly opt out of changelog inclusion. Use `CHANGELOG-NONE`
+for PRs that should never appear in the changelog (e.g. refactors,
+internal tooling, CI changes). This prevents the changelog agent from
+inferring an entry.
+
+CHANGELOG-NEW-FEATURE: {{text goes here...}}
+CHANGELOG-IMPROVEMENT: {{text goes here...}}
+CHANGELOG-BUG-FIX: {{text goes here...}}
+CHANGELOG-BUG-FIX: {{more text goes here...}}
+CHANGELOG-IMAGE: {{GCP-hosted URL goes here...}}
+CHANGELOG-OZ: {{text goes here...}}
+CHANGELOG-TUI: {{text goes here...}}
+CHANGELOG-NONE
+-->
+
+(cherry picked from commit 3c511541817bc825a0e6ecac9e2a32d4fb1631c3)
+---
+ app/src/settings_view/features_page.rs | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/settings_view/features_page.rs b/app/src/settings_view/features_page.rs
+index cf75a3a77..27de398fb 100644
+--- a/app/src/settings_view/features_page.rs
++++ b/app/src/settings_view/features_page.rs
+@@ -3631,9 +3631,9 @@ impl FeaturesPageView {
+                 .unwrap_or_default();
+ 
+         // Determine the current tab behavior based on the user's keybindings.
+-        *self.tab_behavior = if self.completions_keystroke.to_uppercase() == TAB_KEYSTROKE_STR {
++        *self.tab_behavior = if *self.completions_keystroke == TAB_KEYSTROKE_STR {
+             TabBehavior::Completions
+-        } else if self.autosuggestions_keystroke.to_uppercase() == TAB_KEYSTROKE_STR {
++        } else if *self.autosuggestions_keystroke == TAB_KEYSTROKE_STR {
+             TabBehavior::Autosuggestions
+         } else {
+             TabBehavior::UserDefined

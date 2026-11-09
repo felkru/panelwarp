@@ -1,0 +1,105 @@
+From 8040fa0c66112ad31bd008cab60ca05c3f0d07e2 Mon Sep 17 00:00:00 2001
+From: Alex Brodsky <122503996+Albro3459@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 12:23:13 -0600
+Subject: [PATCH] Save custom keybindings in localStorage on the web
+
+The web build never saved keybindings: save_custom_keybindings only
+logged "TODO(wasm)", and the read side opened keybindings.yaml from a
+filesystem the web doesn't have. A rebinding, or the Tab key behavior
+setting (which rebinds Tab), lasted until the page reloaded.
+
+The web build now keeps the keybindings file's text, the same YAML as
+desktop's keybindings.yaml, in localStorage under CustomKeybindings.
+Embedded hosts persist it with the rest of localStorage; the VS Code
+panel writes it to a keybindings.yaml.
+
+Built for wasm (wasm-fast) and tested in a browser: the Tab key behavior
+choice is stored and still applies after a page reload.
+---
+ app/src/keyboard.rs | 43 ++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 36 insertions(+), 7 deletions(-)
+
+diff --git a/app/src/keyboard.rs b/app/src/keyboard.rs
+index e4a7ff467..b638e366d 100644
+--- a/app/src/keyboard.rs
++++ b/app/src/keyboard.rs
+@@ -9,6 +9,8 @@ use warpui::AppContext;
+ use warpui::keymap::Keystroke;
+ #[cfg(not(test))]
+ use warpui::keymap::Trigger;
++#[cfg(all(not(test), target_family = "wasm"))]
++use warpui_extras::user_preferences::{UserPreferences as _, local_storage::LocalStoragePreferences};
+ 
+ /// Environment variable to disable saving keybindings to file (used in integration tests)
+ pub const DISABLE_SAVE_ENV_VAR: &str = "WARP_TEST_DISABLE_KEYBINDING_SAVE";
+@@ -31,6 +33,10 @@ impl UserDefinedKeybinding {
+ }
+ 
+ const KEYBINDINGS_FILE_NAME: &str = "keybindings.yaml";
++/// The web build has no filesystem, so it keeps the keybindings file's text in localStorage under
++/// this key.
++#[cfg(all(not(test), target_family = "wasm"))]
++const KEYBINDINGS_STORAGE_KEY: &str = "CustomKeybindings";
+ 
+ /// Load all stored custom keybindings into the UI framework so that they are used
+ #[cfg(not(test))]
+@@ -96,7 +102,7 @@ pub fn keybinding_file_path() -> std::path::PathBuf {
+     warp_core::paths::config_local_dir().join(KEYBINDINGS_FILE_NAME)
+ }
+ 
+-/// Save the custom keybindings map to disk.
++/// Save the custom keybindings map to disk (localStorage on the web).
+ #[cfg(not(test))]
+ // Allow unused variables when no local filesystem exists as the arg is unused.
+ #[cfg_attr(not(feature = "local_fs"), allow(unused_variables))]
+@@ -115,21 +121,44 @@ fn save_custom_keybindings(map: CustomKeybindings) {
+             if let Err(e) = serde_yaml::to_writer(writer, &map) {
+                 log::warn!("Unable to serialize custom keybindings to file: {e}");
+             }
++        } else if #[cfg(target_family = "wasm")] {
++            let yaml = match serde_yaml::to_string(&map) {
++                Ok(yaml) => yaml,
++                Err(e) => {
++                    log::warn!("Unable to serialize custom keybindings: {e}");
++                    return;
++                }
++            };
++            if let Err(e) = LocalStoragePreferences.write_value(KEYBINDINGS_STORAGE_KEY, yaml) {
++                log::warn!("Unable to store custom keybindings: {e}");
++            }
+         } else {
+-            log::warn!("TODO(wasm): need to implement keybindings support");
++            log::warn!("TODO: need to implement keybindings support without a filesystem");
+         }
+     }
+ }
+ 
+-/// Read the stored custom keybindings from disk into a map of Editable Binding Name -> Trigger
++/// Read the stored custom keybindings from disk (localStorage on the web) into a map of Editable
++/// Binding Name -> Trigger
+ ///
+ /// Returns `None` if the file can't be read or the deserialization fails
+ #[cfg(not(test))]
+ fn read_custom_keybindings() -> Option<CustomKeybindings> {
+-    let file = std::fs::File::open(keybinding_file_path()).ok()?;
+-    let reader = std::io::BufReader::new(file);
+-
+-    match serde_yaml::from_reader(reader) {
++    #[cfg(target_family = "wasm")]
++    let parsed = {
++        let yaml = LocalStoragePreferences
++            .read_value(KEYBINDINGS_STORAGE_KEY)
++            .ok()
++            .flatten()?;
++        serde_yaml::from_str(&yaml)
++    };
++    #[cfg(not(target_family = "wasm"))]
++    let parsed = {
++        let file = std::fs::File::open(keybinding_file_path()).ok()?;
++        serde_yaml::from_reader(std::io::BufReader::new(file))
++    };
++
++    match parsed {
+         Ok(map) => Some(map),
+         Err(e) => {
+             log::warn!("Unable to deserialize stored keybindings: {e}");

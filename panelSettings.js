@@ -1,7 +1,7 @@
 // The panel's own settings live in Warp's settings (Warp's `HostAiSettings` group, shown in its
 // settings UI and in settings.toml under `host.*`), so there is one place to configure the panel.
-// Warp stores them in localStorage, which extension.js mirrors into globalState; this reads them
-// from that mirror.
+// Warp stores them in localStorage; this reads them from the window's copy of those entries
+// (settingsFile.js).
 
 const vscode = require('vscode');
 
@@ -44,14 +44,18 @@ const decode = (raw) => JSON.parse(JSON.parse(raw));
 const encode = (value) => JSON.stringify(JSON.stringify(value));
 
 class PanelSettings {
-  /** @param {vscode.Memento} globalState @param {string} storageKey the mirror's globalState key */
-  constructor(globalState, storageKey) {
+  /**
+   * @param {vscode.Memento} globalState @param {string} storageKey the mirror's globalState key
+   * @param {() => object} entries this window's localStorage entries
+   */
+  constructor(globalState, storageKey, entries) {
     this.globalState = globalState;
     this.storageKey = storageKey;
+    this.entries = entries;
   }
 
   get(key) {
-    const raw = this.globalState.get(this.storageKey, {})[key];
+    const raw = this.entries()[key];
     if (raw === undefined) return DEFAULTS[key];
     try {
       return decode(raw) ?? DEFAULTS[key];

@@ -62,7 +62,16 @@
         const check = () => {
           if (document.querySelector('canvas')) {
             requestAnimationFrame(() => setTimeout(() => this.root.classList.add('done'), 250));
-            if (embedded) window.parent.postMessage({ type: 'warp-loaded', timing: loadTiming() }, '*');
+            if (embedded) {
+              window.parent.postMessage(
+                {
+                  type: 'warp-loaded',
+                  timing: loadTiming(),
+                  liveSettings: typeof window.warpPanelReloadSettings === 'function',
+                },
+                '*',
+              );
+            }
           } else {
             setTimeout(check, 100);
           }
@@ -161,7 +170,7 @@
     // Keys listed in ?keys= (VS Code-style specs, e.g. "cmd+shift+p") are routed to the
     // embedding VS Code webview instead of Warp, like terminal.integrated.commandsToSkipShell.
     const params = new URLSearchParams(location.search);
-    const routedKeys = JSON.parse(params.get('keys') || '[]').map(parseSpec);
+    let routedKeys = JSON.parse(params.get('keys') || '[]').map(parseSpec);
     const embedded = window.parent !== window;
 
     function parseSpec(spec) {
@@ -463,6 +472,8 @@
           );
         } else if (msg.type === 'warp-focus') {
           canvas?.focus();
+        } else if (msg.type === 'warp-routed-keys') {
+          routedKeys = msg.keys.map(parseSpec);
         } else if (msg.type === 'warp-send-key' && canvas) {
           canvas.focus();
           // Warp tracks modifiers from their own key events, so press them around the key. Each
@@ -527,6 +538,16 @@
         }
         clear.call(this);
       };
+      // Entries changed in the extension's settings files: written without reporting them back,
+      // then our Warp build re-reads them (app/src/platform/wasm.rs, host_settings).
+      window.addEventListener('message', (e) => {
+        if (e.source !== window.parent || e.data?.type !== 'warp-storage-update') return;
+        for (const [key, value] of Object.entries(e.data.changes || {})) {
+          if (value === null) removeItem.call(window.localStorage, key);
+          else setItem.call(window.localStorage, key, String(value));
+        }
+        window.warpPanelReloadSettings?.();
+      });
     }
 
     let started = false;

@@ -93,6 +93,7 @@
  "HostAiRecentCommandsInContext": "host.ai.recent_commands_in_context",
  "HostHistorySync": "host.history_sync",
  "HostKeysToHost": "host.keys_to_host",
+ "HostMemoryWarningGb": "host.memory_warning_gb",
  "IncludeAgentCommandsInHistory": "agents.warp_agent.input.include_agent_commands_in_history",
  "InputBoxTypeSetting": "terminal.input.input_box_type_setting",
  "InputMode": "appearance.input.input_mode",
