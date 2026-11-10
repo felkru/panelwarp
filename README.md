@@ -9,7 +9,7 @@ local PTY server, so you get Warp's terminal without leaving VS Code:
 
 - **Blocks**: every command and its output is a block you can select, copy and search.
 - **Warp's input editor**: multi-line editing, completions, syntax highlighting, history search.
-- **Tabs and splits**, restored across VS Code windows and restarts.
+- **Tabs and splits**, restored per folder or workspace across reloads and restarts.
 - **Shells keep running across window reloads**, like VS Code's own terminal.
 - **AI command search (`#`) and Next Command** with your own OpenRouter key (bring your own key,
   stored in VS Code's secret storage; zero-data-retention routing on by default).

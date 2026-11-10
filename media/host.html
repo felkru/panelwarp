@@ -539,8 +539,8 @@
       window.warpPanelCommandHistory = () => historyJson ?? null;
       // Local workflow files (~/.warp/workflows, the workspace's .warp/workflows) for Ctrl+R.
       window.warpPanelWorkflows = () => workflowsJson ?? null;
-      // Tabs from the last panel to close in any VS Code window (sessionStore.js); Warp sends
-      // its layout when it changes and each finished block (app/src/persistence/host_session.rs).
+      // This workspace's tabs from its last panel to close (sessionStore.js); Warp sends its
+      // layout when it changes and each finished block (app/src/persistence/host_session.rs).
       window.warpPanelSession = () => sessionJson ?? null;
       if (embedded) {
         window.warpPanelSaveSession = (json) =>

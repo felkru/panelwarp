@@ -15,7 +15,7 @@ const { SettingsFile } = require('./settingsFile');
 const { WarpAi } = require('./ai');
 const { PanelSettings, confirm } = require('./panelSettings');
 const { CommandHistory } = require('./history');
-const { SessionStore } = require('./sessionStore');
+const { SessionStore, workspaceKey } = require('./sessionStore');
 const filePaths = require('./filePaths');
 const { readWorkflowFiles } = require('./workflows');
 const { AgentConversations, openPendingClaudeConversation } = require('./agents');
@@ -398,7 +398,7 @@ class WarpViewProvider {
         break;
       case 'warp-save-session':
         try {
-          this.sessions?.saveSession(msg.json);
+          this.sessions?.saveSession(this.workspace, msg.json);
         } catch (error) {
           this.log.appendLine(`save tabs: ${error.message}`);
         }
@@ -454,10 +454,10 @@ class WarpViewProvider {
     this.view?.webview.postMessage(msg);
   }
 
-  /** The tabs to restore (sessionStore.js), as JSON; null if none or unreadable. */
+  /** This workspace's tabs to restore (sessionStore.js), as JSON; null if none or unreadable. */
   loadSession() {
     try {
-      return this.sessions?.load() ?? null;
+      return this.sessions?.load(this.workspace) ?? null;
     } catch (error) {
       this.log.appendLine(`load tabs: ${error.message}`);
       return null;
@@ -655,6 +655,7 @@ function activate(context) {
     log.appendLine(`command history unavailable: ${error.message}`);
   }
   try {
+    provider.workspace = workspaceKey(vscode.workspace, context.workspaceState);
     provider.sessions = new SessionStore(context.globalStorageUri.fsPath);
   } catch (error) {
     log.appendLine(`tab restoration unavailable: ${error.message}`);

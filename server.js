@@ -393,16 +393,22 @@ async function startServer({
       const target = new URL(host.ptyBaseUrl);
       for (const [name, value] of url.searchParams) if (name !== 'token') target.searchParams.set(name, value);
       const old = new WebSocket(target);
-      const first = await new Promise((resolve) => {
-        const timer = setTimeout(() => resolve(null), 3000);
-        const done = (value) => {
+      // A handover's output can arrive together with its first message; kept until it's clear
+      // the page gets it.
+      const received = [];
+      let deliver = (data, isBinary) => received.push([data, isBinary]);
+      old.on('message', (data, isBinary) => deliver(data, isBinary));
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 3000);
+        const done = () => {
           clearTimeout(timer);
-          resolve(value);
+          resolve();
         };
-        old.once('message', (data, isBinary) => done(isBinary ? null : data.toString()));
-        old.once('error', () => done(null));
-        old.once('close', () => done(null));
+        old.once('message', done);
+        old.once('error', done);
+        old.once('close', done);
       });
+      const first = received[0] && !received[0][1] ? received[0][0].toString() : null;
       let message = null;
       try {
         message = JSON.parse(first);
@@ -413,10 +419,10 @@ async function startServer({
         continue;
       }
       log(`pane ${url.searchParams.get('pane')}: passing through to the previous PTY host ${host.pid}`);
-      ws.send(first);
-      old.on('message', (data, isBinary) => {
+      deliver = (data, isBinary) => {
         if (ws.readyState === WebSocket.OPEN) ws.send(data, { binary: isBinary });
-      });
+      };
+      for (const [data, isBinary] of received) deliver(data, isBinary);
       ws.on('message', (data, isBinary) => {
         if (old.readyState === WebSocket.OPEN) old.send(data, { binary: isBinary });
       });
