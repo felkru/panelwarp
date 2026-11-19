@@ -107,11 +107,10 @@ ${TOML.stringify(panelDefaults)
 const DEFAULTS_INTRO = '# this comment.\n';
 
 /**
- * A panel default edited inside the header's comment (e.g. "# history_sync = true") is easy to
- * mistake for a setting. Returns the text with each one that differs from its default, and that the
- * file doesn't set itself, moved into the settings, and the header restored; null if there's none.
+ * The panel defaults commented in settings.toml text's header; null if it has none, or the header
+ * or the file doesn't parse.
  */
-function promoteEditedDefaults(text) {
+function headerDefaults(text) {
   const intro = text.indexOf(DEFAULTS_INTRO);
   if (intro === -1) return null;
   const lines = text.slice(intro + DEFAULTS_INTRO.length).split('\n');
@@ -120,20 +119,32 @@ function promoteEditedDefaults(text) {
     if (!line.startsWith('#')) break;
     commented.push(line.replace(/^# ?/, ''));
   }
-  let block;
-  let doc;
   try {
-    block = TOML.parse(commented.join('\n'));
-    doc = TOML.parse(text);
+    TOML.parse(text);
+    return JSON.parse(JSON.stringify(TOML.parse(commented.join('\n'))));
   } catch {
     return null;
   }
+}
+
+/**
+ * A panel default edited inside the header's comment (e.g. "# history_sync = true") is easy to
+ * mistake for a setting. Returns the text with each one that changed since `seen` (the file as last
+ * read), differs from its default, and that the file doesn't set itself, moved into the settings,
+ * and the header restored; null if there's none. A header an older version wrote still shows that
+ * version's defaults, which aren't edits.
+ */
+function promoteEditedDefaults(text, seen) {
+  const block = headerDefaults(text);
+  const before = headerDefaults(seen);
+  if (!block || !before) return null;
+  const doc = TOML.parse(text);
   const promoted = [];
   for (const [storageKey, value] of Object.entries(DEFAULTS)) {
     const tomlPath = SETTINGS_MAP[storageKey];
     const edited = getPath(block, tomlPath);
     if (edited === undefined || getPath(doc, tomlPath) !== undefined) continue;
-    if (isDeepStrictEqual(JSON.parse(JSON.stringify(edited)), value)) continue;
+    if (isDeepStrictEqual(edited, value) || isDeepStrictEqual(edited, getPath(before, tomlPath))) continue;
     setPath(doc, tomlPath, edited);
     promoted.push(tomlPath);
   }
@@ -275,6 +286,10 @@ class SettingsFile {
     this.pendingChanges = new Set();
     // Set while the files turn private routing off and nothing has asked about it yet
     this.routingPending = false;
+    // Set while the files this window last read have private routing off, allowed on this machine
+    this.routingOffHere = false;
+    // settings.toml as this window last read it, to tell edits in its header comment
+    this.seenSettings = '';
     const dir = context.globalStorageUri.fsPath;
     this.file = path.join(dir, 'settings.toml');
     this.keybindingsFile = path.join(dir, 'keybindings.yaml');
@@ -332,10 +347,11 @@ class SettingsFile {
     if (typeof mirror[KEYBINDINGS_KEY] === 'string') {
       replace(this.keybindingsFile, JSON.parse(mirror[KEYBINDINGS_KEY]));
     }
-    // Routing off in the mirror was confirmed when it was turned off
-    this.setRoutingOffAllowed(!isPrivateRouting(mirror));
-    // The files now hold the mirror's settings, including any that came from another machine
     const meta = this.globalState.get(this.storageKey, {})[SYNC_META_KEY];
+    // Routing off in a mirror from before settings sync was confirmed here when it was turned off.
+    // A stamped mirror can hold another machine's "off", so that still asks here
+    this.setRoutingOffAllowed(!meta && !isPrivateRouting(mirror));
+    // The files now hold the mirror's settings, including any that came from another machine
     this.writeAppliedSyncIds(typeof meta?.id === 'string' ? [meta.id] : []);
     fs.writeFileSync(this.migratedFile, '');
     this.log.appendLine('moved settings into settings.toml');
@@ -368,6 +384,8 @@ class SettingsFile {
         settingsReadable = false;
         errors.push(`settings.toml: ${error.message}`);
         next = { ...this.state };
+        // A new window's entries start from the mirror, which can hold another machine's "off"
+        if (unconfirmed(next)) next.HostAiPrivateRouting = encode(true);
       }
       try {
         next = withKeybindings(next, read(this.keybindingsFile));
@@ -377,6 +395,11 @@ class SettingsFile {
       return next;
     };
     const unconfirmed = (entries) => !isPrivateRouting(entries) && !fs.existsSync(this.routingAllowedFile);
+    // Routing off in the mirror that this machine hasn't allowed came from another machine, and
+    // this one keeps routing on until it's asked, or after it declined. Not when this window last read
+    // it off itself: a window here turning it back on removes the marker before the mirror shows that
+    const othersOff =
+      !isPrivateRouting(this.mirrorEntries()) && !fs.existsSync(this.routingAllowedFile) && !this.routingOffHere;
     let next = fromFiles();
     if (confirm && settingsReadable && unconfirmed(next)) {
       // One dialog for every sync that asks at once
@@ -389,7 +412,8 @@ class SettingsFile {
     }
     if (settingsReadable && isPrivateRouting(next)) this.setRoutingOffAllowed(false);
     this.routingPending = settingsReadable && !confirm && unconfirmed(next);
-    if (settingsReadable && unconfirmed(next)) {
+    const keptOn = settingsReadable && unconfirmed(next);
+    if (keptOn) {
       next = { ...next, HostAiPrivateRouting: encode(true) };
       if (confirm) {
         fs.writeFileSync(this.file, updateToml(read(this.file), { HostAiPrivateRouting: encode(true) }));
@@ -398,17 +422,31 @@ class SettingsFile {
     }
     const changes = changedEntries(this.state, next);
     this.state = next;
+    this.routingOffHere = !isPrivateRouting(next);
     for (const key of Object.keys(changes)) this.pendingChanges.add(key);
-    if (Object.keys(changes).length) await this.updateMirror(changes);
+    // Routing kept on here isn't a change to send to other machines, which would turn it back on
+    // where it was turned off. Neither is routing on against another machine's "off": a new window
+    // starts from the mirror, so it reads a declined machine's file as turning routing on
+    const { HostAiPrivateRouting: _routing, ...shared } = changes;
+    const mirrorChanges = keptOn || (othersOff && isPrivateRouting(next)) ? shared : changes;
+    if (Object.keys(mirrorChanges).length) await this.updateMirror(mirrorChanges);
     return { changes, errors };
   }
 
-  /** Moves panel defaults edited inside settings.toml's header comment into its settings. */
+  /**
+   * Moves panel defaults edited inside settings.toml's header comment into its settings. Only
+   * edits made after this window first read the file count, so an older version's header can't
+   * pin its defaults.
+   */
   promoteEditedDefaults() {
     let result;
     try {
-      result = promoteEditedDefaults(read(this.file));
+      const text = read(this.file);
+      result = promoteEditedDefaults(text, this.seenSettings);
       if (result) fs.writeFileSync(this.file, result.text);
+      // A file broken by an edit in progress doesn't replace the last good one, so a header edit
+      // saved with an error elsewhere still applies once that's fixed
+      if (headerDefaults(result?.text ?? text)) this.seenSettings = result?.text ?? text;
     } catch (error) {
       this.log.appendLine(`settings.toml: ${error.message}`);
       return;

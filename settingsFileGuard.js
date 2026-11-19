@@ -5,49 +5,73 @@
 // settings while a file is open asks to close the file first, then opens them.
 //
 // The windows of one machine share the files, so each window records whether it has one open in a
-// marker next to them: {"<window session id>": <extension host pid>}. Entries of windows that quit
-// without removing theirs are dropped when their process is gone.
+// marker next to them: {"boot": <boot time>, "windows": {"<window session id>": <extension host
+// pid>}}. Entries of windows that quit without removing theirs are dropped when their process is
+// gone, or with the whole marker once the machine restarts, since a new process can get their pid.
+// A container keeps the host's boot time, but its pids start low again when it restarts, so an
+// entry with this window's pid and another id is dropped too.
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
-const MARKER = '.settings-file-open.json';
+// 0.1.19 kept entries in another format in .settings-file-open.json. A new name keeps its windows
+// and newer ones from dropping each other's entries until they reload
+const MARKER = '.settings-file-windows.json';
+const OPEN_ELSEWHERE =
+  "Warp's settings file is open in another VS Code window. Close it there to open Warp settings.";
+// Boot times computed from the clock drift a little, and a restart moves them by far more
+const BOOT_SLACK_SECONDS = 60;
 
+/** When this machine started, in seconds. */
+function bootTime() {
+  return Math.round(Date.now() / 1000 - os.uptime());
+}
+
+const sameBoot = (a, b) => Math.abs(a - b) < BOOT_SLACK_SECONDS;
+
+// EPERM means another user's process has the pid, which can't be a window of ours
 function alive(pid) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch (error) {
-    return error.code === 'EPERM';
+  } catch {
+    return false;
   }
 }
 
-function readEntries(file) {
+function readJson(file) {
   try {
-    const entries = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return entries && typeof entries === 'object' && !Array.isArray(entries) ? entries : {};
+    const marker = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return marker && typeof marker === 'object' && !Array.isArray(marker) ? marker : {};
   } catch {
     return {};
   }
 }
 
 /** The marker's entries of live windows. */
-function readMarker(file, isAlive = alive) {
+function readMarker(file, isAlive = alive, boot = bootTime()) {
+  const marker = readJson(file);
   const live = {};
-  for (const [id, pid] of Object.entries(readEntries(file))) {
+  if (!sameBoot(marker.boot, boot)) return live;
+  for (const [id, pid] of Object.entries(marker.windows ?? {})) {
     if (Number.isInteger(pid) && isAlive(pid)) live[id] = pid;
   }
   return live;
 }
 
 /** Adds or removes this window's entry and drops dead windows' ones. Returns the live entries. */
-function writeMarker(file, id, pid, open, isAlive = alive) {
-  const before = readEntries(file);
-  const entries = readMarker(file, isAlive);
+function writeMarker(file, id, pid, open, isAlive = alive, boot = bootTime()) {
+  const before = readJson(file);
+  const entries = readMarker(file, isAlive, boot);
+  for (const [other, otherPid] of Object.entries(entries)) {
+    if (otherPid === pid && other !== id) delete entries[other];
+  }
   if (open) entries[id] = pid;
   else delete entries[id];
-  if (JSON.stringify(entries) !== JSON.stringify(before)) {
-    if (Object.keys(entries).length) fs.writeFileSync(file, JSON.stringify(entries));
+  const marker = { boot: sameBoot(before.boot, boot) ? before.boot : boot, windows: entries };
+  if (JSON.stringify(marker) !== JSON.stringify(before)) {
+    if (Object.keys(entries).length) fs.writeFileSync(file, JSON.stringify(marker));
     else fs.rmSync(file, { force: true });
   }
   return entries;
@@ -124,9 +148,7 @@ class SettingsFileGuard {
     if (!this.open) return true;
     const tabs = this.tabs();
     if (!tabs.length) {
-      this.vscode.window.showInformationMessage(
-        "Warp's settings file is open in another VS Code window. Close it there to open Warp settings.",
-      );
+      this.vscode.window.showInformationMessage(OPEN_ELSEWHERE);
       return false;
     }
     const docs = this.vscode.workspace.textDocuments.filter(
@@ -149,8 +171,10 @@ class SettingsFileGuard {
     }
     await this.vscode.window.tabGroups.close(this.tabs());
     this.refresh();
+    // Only another window's tab needs saying: a tab here that didn't close is in view
+    if (!this.openHere && this.open) this.vscode.window.showInformationMessage(OPEN_ELSEWHERE);
     return !this.open;
   }
 }
 
-module.exports = { SettingsFileGuard, readMarker, writeMarker };
+module.exports = { SettingsFileGuard, OPEN_ELSEWHERE, readMarker, writeMarker };

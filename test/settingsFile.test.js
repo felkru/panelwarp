@@ -423,6 +423,124 @@ test('private routing turned off on another machine still asks on this one', asy
   assert.equal(TOML.parse(fs.readFileSync(f.settings.file, 'utf8')).host.ai.private_routing, true);
 });
 
+// Machine A turns private routing off and confirms it, and machine B gets that through settings sync
+async function routingOffOnA(t) {
+  const a = await fixture(t);
+  a.allowRouting();
+  fs.writeFileSync(a.settings.file, '[host.ai]\nprivate_routing = false\n');
+  await a.settings.apply(true);
+  const b = await fixture(t);
+  b.receiveSync(a.mirror);
+  return { a, b, stamp: a.mirror.__panelwarpSync };
+}
+
+// A pulls what B left in the mirror and keeps routing off
+async function assertOffOnA(a, b) {
+  a.receiveSync(b.mirror);
+  await a.settings.apply(false);
+  assert.equal(a.page.HostAiPrivateRouting, '"false"');
+  assert.equal(TOML.parse(fs.readFileSync(a.settings.file, 'utf8')).host.ai.private_routing, false);
+}
+
+test('private routing kept on by a machine that has not been asked stays off where it was turned off', async (t) => {
+  const { a, b } = await routingOffOnA(t);
+  await a.settings.save({ FontSize: '"15"' });
+  b.receiveSync(a.mirror);
+  await b.settings.apply(false);
+  assert.equal(b.page.HostAiPrivateRouting, '"true"');
+  // B passes on A's font as its own change, without routing
+  assert.equal(b.mirror.FontSize, '"15"');
+  assert.equal(b.mirror.__panelwarpSync.from, fs.readFileSync(b.settings.syncIdFile, 'utf8'));
+  assert.equal(b.mirror.HostAiPrivateRouting, '"false"');
+  await assertOffOnA(a, b);
+});
+
+test('declining private routing off from another machine keeps it off there', async (t) => {
+  const { a, b, stamp } = await routingOffOnA(t);
+  await b.settings.apply(true);
+  assert.equal(b.confirmations.length, 1);
+  assert.equal(b.page.HostAiPrivateRouting, '"true"');
+  assert.equal(TOML.parse(fs.readFileSync(b.settings.file, 'utf8')).host.ai.private_routing, true);
+  assert.equal(b.mirror.HostAiPrivateRouting, '"false"');
+  assert.deepEqual(b.mirror.__panelwarpSync, stamp);
+  await assertOffOnA(a, b);
+});
+
+test("a new window on a machine that declined private routing off doesn't turn it back on", async (t) => {
+  const { a, b, stamp } = await routingOffOnA(t);
+  await b.settings.apply(true);
+  // B's next window starts from the mirror, which has A's "off", and reads routing on from the file
+  const window = await fixture(t, { dir: path.dirname(b.settings.file), mirror: b.mirror });
+  assert.equal(window.settings.state.HostAiPrivateRouting, '"true"');
+  assert.equal(window.mirror.HostAiPrivateRouting, '"false"');
+  assert.deepEqual(window.mirror.__panelwarpSync, stamp);
+  await assertOffOnA(a, window);
+});
+
+test('a new window keeps private routing on while settings.toml is broken', async (t) => {
+  const { a, b, stamp } = await routingOffOnA(t);
+  await b.settings.apply(true);
+  fs.appendFileSync(b.settings.file, '\n[broken\n');
+  const window = await fixture(t, { dir: path.dirname(b.settings.file), mirror: b.mirror });
+  assert.equal(window.errors.length, 1);
+  assert.equal(window.settings.state.HostAiPrivateRouting, '"true"');
+  assert.equal(window.mirror.HostAiPrivateRouting, '"false"');
+  assert.deepEqual(window.mirror.__panelwarpSync, stamp);
+  await assertOffOnA(a, window);
+});
+
+test('a new remote host whose mirror has private routing off from another machine asks once', async (t) => {
+  const { a, b, stamp } = await routingOffOnA(t);
+  await b.settings.apply(true);
+  // A remote window of B's on a new host shares B's mirror and has its own files
+  const host = await fixture(t, { mirror: b.mirror });
+  assert.equal(fs.existsSync(host.settings.routingAllowedFile), false);
+  assert.equal(host.settings.state.HostAiPrivateRouting, '"true"');
+  assert.equal(host.settings.routingPending, true);
+  await host.settings.apply(true);
+  assert.equal(host.confirmations.length, 1);
+  assert.equal(TOML.parse(fs.readFileSync(host.settings.file, 'utf8')).host.ai.private_routing, true);
+  assert.equal(host.mirror.HostAiPrivateRouting, '"false"');
+  assert.deepEqual(host.mirror.__panelwarpSync, stamp);
+  await assertOffOnA(a, host);
+});
+
+test('a mirror from before settings sync with private routing off keeps it off without asking', async (t) => {
+  const f = await fixture(t, { mirror: { HostAiPrivateRouting: '"false"' } });
+  assert.equal(fs.existsSync(f.settings.routingAllowedFile), true);
+  assert.equal(f.settings.state.HostAiPrivateRouting, '"false"');
+  await f.settings.apply(true);
+  assert.equal(f.confirmations.length, 0);
+  assert.equal(f.page.HostAiPrivateRouting, '"false"');
+});
+
+test('a machine that turned private routing off can turn it back on everywhere', async (t) => {
+  const { a, b } = await routingOffOnA(t);
+  b.allowRouting();
+  await b.settings.apply(true);
+  assert.equal(b.page.HostAiPrivateRouting, '"false"');
+  fs.writeFileSync(a.settings.file, '[host.ai]\nprivate_routing = true\n');
+  await a.settings.apply(false);
+  assert.equal(a.mirror.HostAiPrivateRouting, '"true"');
+  b.receiveSync(a.mirror);
+  await b.settings.apply(false);
+  assert.equal(b.page.HostAiPrivateRouting, '"true"');
+});
+
+test("turning private routing back on in one window isn't undone by another window's late mirror", async (t) => {
+  const w1 = await fixture(t);
+  w1.allowRouting();
+  fs.writeFileSync(w1.settings.file, '[host.ai]\nprivate_routing = false\n');
+  await w1.settings.apply(true);
+  const w2 = await fixture(t, { dir: path.dirname(w1.settings.file), mirror: w1.mirror });
+  await w1.settings.save({ HostAiPrivateRouting: '"true"', FontSize: '"16"' });
+  // Window 2's watcher runs before window 1's mirror write reaches it
+  await w2.settings.apply(false);
+  assert.equal(w2.page.HostAiPrivateRouting, '"true"');
+  assert.equal(w2.mirror.HostAiPrivateRouting, '"true"');
+  assert.equal(w2.mirror.FontSize, '"16"');
+});
+
 test("a new machine's files start from the synced mirror without its sync choice", async (t) => {
   const f = await fixture(t, { mirror: otherMachine({ FontSize: '"15"', HostSettingsSync: '"false"' }) });
   assert.equal(fontSize(f), 15);
@@ -450,12 +568,59 @@ test('a panel default edited inside the header comment applies and moves out of 
   assert.match(after, /^# history_sync = false$/m);
 });
 
+test('a header edit saved with an error elsewhere in the file applies once that is fixed', async (t) => {
+  const f = await fixture(t);
+  const edited = fs.readFileSync(f.settings.file, 'utf8').replace(/^# history_sync = false$/m, '# history_sync = true');
+  fs.writeFileSync(f.settings.file, `${edited}\n[broken`);
+  await f.settings.apply(false);
+  fs.writeFileSync(f.settings.file, edited);
+  await f.settings.apply(false);
+  assert.equal(f.page.HostHistorySync, '"true"');
+  assert.equal(TOML.parse(fs.readFileSync(f.settings.file, 'utf8')).host.history_sync, true);
+});
+
 test('the header comment does not override a setting the file sets', () => {
   const { promoteEditedDefaults, renderToml } = loadSettings({});
-  assert.equal(promoteEditedDefaults(renderToml({})), null);
+  const header = renderToml({});
+  assert.equal(promoteEditedDefaults(header, header), null);
   // An unedited header, or an edit to a setting set below it, changes nothing
-  const set = renderToml({}).replace(/^# history_sync = false$/m, '# history_sync = true') + '\n[host]\nhistory_sync = false\n';
-  assert.equal(promoteEditedDefaults(set), null);
+  const set = header.replace(/^# history_sync = false$/m, '# history_sync = true') + '\n[host]\nhistory_sync = false\n';
+  assert.equal(promoteEditedDefaults(set, header), null);
   // A broken comment block is left alone
-  assert.equal(promoteEditedDefaults(renderToml({}).replace('# [host]', '# [host')), null);
+  assert.equal(promoteEditedDefaults(header.replace('# [host]', '# [host'), header), null);
+});
+
+// The header as a version with an older fast model default wrote it
+const staleHeader = (text) => text.replace(/^# fast_model = .*$/m, '# fast_model = "old/model"');
+
+test("an older version's defaults in the header are not taken as edits", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'panelwarp-header-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const { renderToml } = loadSettings({});
+  fs.writeFileSync(path.join(dir, 'settings.toml'), staleHeader(renderToml({})));
+  fs.writeFileSync(path.join(dir, '.settings-migrated'), '');
+  const f = await fixture(t, { dir });
+  await f.settings.apply(false);
+  assert.equal(f.settings.state.HostAiFastModel, undefined);
+  assert.match(fs.readFileSync(f.settings.file, 'utf8'), /^# fast_model = "old\/model"$/m);
+  // An edit to another line applies alone and the header shows the current defaults again
+  const text = fs.readFileSync(f.settings.file, 'utf8');
+  fs.writeFileSync(f.settings.file, text.replace(/^# history_sync = false$/m, '# history_sync = true'));
+  await f.settings.apply(false);
+  assert.equal(f.page.HostHistorySync, '"true"');
+  assert.equal(f.settings.state.HostAiFastModel, undefined);
+  const after = fs.readFileSync(f.settings.file, 'utf8');
+  assert.equal(TOML.parse(after).host.history_sync, true);
+  assert.equal(TOML.parse(after).host.ai, undefined);
+  assert.match(after, /^# fast_model = "deepseek\/deepseek-v4.1-flash"$/m);
+});
+
+test('only header lines changed since the last read count as edits', () => {
+  const { promoteEditedDefaults, renderToml } = loadSettings({});
+  const stale = staleHeader(renderToml({}));
+  assert.equal(promoteEditedDefaults(stale, stale), null);
+  const edited = stale.replace(/^# fast_model = .*$/m, '# fast_model = "my/model"');
+  const result = promoteEditedDefaults(edited, stale);
+  assert.deepEqual(result.promoted, ['host.ai.fast_model']);
+  assert.equal(TOML.parse(result.text).host.ai.fast_model, 'my/model');
 });

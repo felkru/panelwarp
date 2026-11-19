@@ -1,0 +1,61 @@
+From 9eeaae9d2ca4661aff23df99a92c3b404e588605 Mon Sep 17 00:00:00 2001
+From: Alex Brodsky <122503996+Albro3459@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 17:55:38 -0800
+Subject: [PATCH] Settings and keyboard shortcuts don't show as not synced in
+ embedded builds
+
+Embedded builds showed "This setting is not synced to your other devices" on every setting Warp never syncs to its cloud and on Tab key behavior, and "Keyboard shortcuts are not synced to the cloud" on the keyboard shortcuts page. The host syncs every setting and keybinding to the user's other machines, so the icon no longer shows in embedded builds. Desktop builds are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ app/src/settings_view/features_page.rs | 5 ++++-
+ app/src/settings_view/keybindings.rs   | 4 +++-
+ app/src/settings_view/settings_page.rs | 4 ++++
+ 3 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/app/src/settings_view/features_page.rs b/app/src/settings_view/features_page.rs
+index 27de398fb..a4bd88167 100644
+--- a/app/src/settings_view/features_page.rs
++++ b/app/src/settings_view/features_page.rs
+@@ -6875,7 +6875,10 @@ impl SettingsWidget for TabKeyBehaviorWidget {
+                     .build()
+                     .finish(),
+             );
+-        if *CloudPreferencesSettings::as_ref(app).settings_sync_enabled {
++        // Embedded builds' host syncs this setting to the user's other machines
++        if !cfg!(feature = "remote_tty")
++            && *CloudPreferencesSettings::as_ref(app).settings_sync_enabled
++        {
+             tab_key_span.add_child(render_local_only_icon(
+                 appearance,
+                 view.button_mouse_states
+diff --git a/app/src/settings_view/keybindings.rs b/app/src/settings_view/keybindings.rs
+index 2310aa0fc..c297822ce 100644
+--- a/app/src/settings_view/keybindings.rs
++++ b/app/src/settings_view/keybindings.rs
+@@ -1169,7 +1169,9 @@ impl SettingsWidget for KeybindingsWidget {
+         appearance: &Appearance,
+         app: &AppContext,
+     ) -> Box<dyn Element> {
+-        let local_only_icon_state = if *CloudPreferencesSettings::as_ref(app).settings_sync_enabled
++        // Embedded builds' host syncs keybindings to the user's other machines
++        let local_only_icon_state = if !cfg!(feature = "remote_tty")
++            && *CloudPreferencesSettings::as_ref(app).settings_sync_enabled
+         {
+             Some(LocalOnlyIconState::Visible {
+                 mouse_state: self.local_only_icon_mouse_state.clone(),
+diff --git a/app/src/settings_view/settings_page.rs b/app/src/settings_view/settings_page.rs
+index 50cca7998..9caa227ae 100644
+--- a/app/src/settings_view/settings_page.rs
++++ b/app/src/settings_view/settings_page.rs
+@@ -618,6 +618,10 @@ impl LocalOnlyIconState {
+         mouse_states: &mut HashMap<String, MouseStateHandle>,
+         app: &AppContext,
+     ) -> Self {
++        // Embedded builds' host syncs every setting to the user's other machines
++        if cfg!(feature = "remote_tty") {
++            return Self::Hidden;
++        }
+         if !*CloudPreferencesSettings::as_ref(app).settings_sync_enabled {
+             // Only show the local-only icon if settings sync is enabled.
+             return Self::Hidden;

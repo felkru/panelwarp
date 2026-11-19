@@ -12,7 +12,7 @@ const path = require('path');
 const { shellLaunch, wasmEtag } = require('./server');
 const { ensurePtyHost } = require('./ptyHost');
 const { SettingsFile } = require('./settingsFile');
-const { SettingsFileGuard } = require('./settingsFileGuard');
+const { SettingsFileGuard, OPEN_ELSEWHERE } = require('./settingsFileGuard');
 const { WarpAi } = require('./ai');
 const { PanelSettings, confirm } = require('./panelSettings');
 const { CommandHistory } = require('./history');
@@ -386,8 +386,12 @@ class WarpViewProvider {
         // Opening settings while the file is open: close it first, apply it, then open them
         if (await this.settingsGuard?.requestClose()) {
           await this.settingsFile.apply(false);
-          this.post({ type: 'warp-settings-file-state', open: false });
-          this.post({ type: 'warp-open-settings-page', page: String(msg.page || '') });
+          // A window can open the file again while it applies
+          this.settingsGuard.refresh();
+          const { open } = this.settingsGuard;
+          this.post({ type: 'warp-settings-file-state', open });
+          if (!open) this.post({ type: 'warp-open-settings-page', page: String(msg.page || '') });
+          else if (!this.settingsGuard.openHere) vscode.window.showInformationMessage(OPEN_ELSEWHERE);
         }
         break;
       case 'warp-resolve-paths': {
