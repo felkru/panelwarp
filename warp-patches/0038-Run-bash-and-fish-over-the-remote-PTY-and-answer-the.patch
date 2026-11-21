@@ -1,7 +1,7 @@
-From 367f854c120a791a181da26120f47c8439eea774 Mon Sep 17 00:00:00 2001
+From 1d1683f03d220b2b179c24fb792f2fcd2d5d0ced Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 14:53:51 -0700
-Subject: [PATCH 38/74] Run bash and fish over the remote PTY, and answer the
+Subject: [PATCH 38/73] Run bash and fish over the remote PTY, and answer the
  shell's terminal queries
 
 The host app names its shell in the session endpoint (`shell=bash`); remote_tty uses it for the
@@ -25,7 +25,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 app/src/terminal/remote_tty/event_loop_tests.rs
 
 diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
-index bea6069..88b9a82 100644
+index de1d4e8..42a95db 100644
 --- a/app/src/terminal/remote_tty/event_loop.rs
 +++ b/app/src/terminal/remote_tty/event_loop.rs
 @@ -1,4 +1,4 @@
@@ -141,7 +141,7 @@ index bea6069..88b9a82 100644
                  }
  
                  while let Ok(first) = receiver.recv().await {
-@@ -341,24 +380,61 @@ impl EventLoop {
+@@ -343,24 +382,61 @@ impl EventLoop {
          );
      }
  
@@ -212,7 +212,7 @@ index bea6069..88b9a82 100644
          ))
          .await?;
  
-@@ -371,11 +447,16 @@ impl EventLoop {
+@@ -373,11 +449,16 @@ impl EventLoop {
      /// order to dogfood Warp on Web over the remote tty.
      async fn write_env_vars(
          sink: &mut impl Sink,
@@ -230,7 +230,7 @@ index bea6069..88b9a82 100644
          sink.send(Message::new_binary(honor_ps1_env_var.as_bytes().to_vec()))
              .await?;
  
-@@ -406,10 +487,22 @@ impl EventLoop {
+@@ -408,10 +489,22 @@ impl EventLoop {
      }
  
      /// Processes a byte slice through the `Processor`.
@@ -256,7 +256,7 @@ index bea6069..88b9a82 100644
          self.channel_event_listener.send_wakeup_event();
      }
  }
-@@ -417,3 +510,7 @@ impl EventLoop {
+@@ -419,3 +512,7 @@ impl EventLoop {
  impl Entity for EventLoop {
      type Event = ();
  }

@@ -1,7 +1,7 @@
-From 2c9702e5bc5e36d5ef09641f34d289bf1f884f8f Mon Sep 17 00:00:00 2001
+From 0c627c0e9d0fa2e13ad320afd0d8ff4c3f764a4c Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 16:16:55 -0700
-Subject: [PATCH 17/74] Trim Features and Privacy settings in embedded builds
+Subject: [PATCH 17/73] Trim Features and Privacy settings in embedded builds
 
 Telemetry and crash reports are forced off. The Privacy page keeps only
 secret redaction. Features drops the agent bar, default mode, changelog,
@@ -98,7 +98,7 @@ index c11710c..e8a3fa6 100644
          if new_value != old_value {
              self.is_telemetry_enabled = new_value;
 diff --git a/app/src/settings_view/features_page.rs b/app/src/settings_view/features_page.rs
-index 1ca1948..cf75a3a 100644
+index f3e3483..27de398 100644
 --- a/app/src/settings_view/features_page.rs
 +++ b/app/src/settings_view/features_page.rs
 @@ -2774,8 +2774,13 @@ impl FeaturesPageView {

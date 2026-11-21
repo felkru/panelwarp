@@ -1,7 +1,7 @@
-From c2fd3b025974b86d88f37662ed778c72871b2d71 Mon Sep 17 00:00:00 2001
+From ad8743a19e4f73488f4ed20502594b16af6707b0 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 13:33:29 -0700
-Subject: [PATCH 05/74] embedded: host bridge for Open settings file and AI
+Subject: [PATCH 05/73] embedded: host bridge for Open settings file and AI
  command search (BYOK)
 
 Open settings file calls window.warpPanelOpenSettingsFile. AI command search (#) works without a
@@ -21,10 +21,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  8 files changed, 108 insertions(+), 6 deletions(-)
 
 diff --git a/app/Cargo.toml b/app/Cargo.toml
-index beb7b53..df3ee05 100644
+index 29b491e..5b1f9f0 100644
 --- a/app/Cargo.toml
 +++ b/app/Cargo.toml
-@@ -359,6 +359,7 @@ syntect = { version = "5.0", default-features = false, features = [
+@@ -363,6 +363,7 @@ syntect = { version = "5.0", default-features = false, features = [
      "default-fancy",
  ] }
  wasm-bindgen.workspace = true
@@ -33,7 +33,7 @@ index beb7b53..df3ee05 100644
  getrandom = { version = "0.2", features = ["js"] }
  gloo.workspace = true
 diff --git a/app/src/ai_assistant/mod.rs b/app/src/ai_assistant/mod.rs
-index b2cf1e7..2d1d05e 100644
+index c86128a..03b39e4 100644
 --- a/app/src/ai_assistant/mod.rs
 +++ b/app/src/ai_assistant/mod.rs
 @@ -90,6 +90,21 @@ pub struct AIGeneratedCommandParameter {
@@ -154,10 +154,10 @@ index 3ab39d4..d1d052f 100644
                      WarpAIDataSource::new(self.ai_client.clone(), None),
                      HashSet::from([QueryFilter::NaturalLanguage]),
 diff --git a/app/src/server/server_api/ai.rs b/app/src/server/server_api/ai.rs
-index b319361..202bc66 100644
+index 7a27b39..d74ee75 100644
 --- a/app/src/server/server_api/ai.rs
 +++ b/app/src/server/server_api/ai.rs
-@@ -1938,6 +1938,12 @@ impl AIClient for ServerApi {
+@@ -2370,6 +2370,12 @@ impl AIClient for ServerApi {
          // TODO: use relevant context from RequestContext and deprecate usage of ai_execution_context
          _ai_execution_context: Option<WarpAiExecutionContext>,
      ) -> Result<Vec<AIGeneratedCommand>, GenerateCommandsFromNaturalLanguageError> {
@@ -171,10 +171,10 @@ index b319361..202bc66 100644
  
          let variables = GenerateCommandsVariables {
 diff --git a/app/src/settings/ai.rs b/app/src/settings/ai.rs
-index 590d091..e0381ad 100644
+index 5a5e70d..c5cbfcf 100644
 --- a/app/src/settings/ai.rs
 +++ b/app/src/settings/ai.rs
-@@ -2263,6 +2263,12 @@ impl AISettings {
+@@ -2274,6 +2274,12 @@ impl AISettings {
          !user_workspaces.is_ai_allowed_in_remote_sessions(&scope)
      }
  
@@ -188,10 +188,10 @@ index 590d091..e0381ad 100644
          // Disable AI for anonymous and logged-out users.
          let is_anonymous_or_logged_out = AuthStateProvider::as_ref(app)
 diff --git a/app/src/terminal/input.rs b/app/src/terminal/input.rs
-index 980bafb..6319b53 100644
+index f8ff43f..ff084b5 100644
 --- a/app/src/terminal/input.rs
 +++ b/app/src/terminal/input.rs
-@@ -7501,8 +7501,8 @@ impl Input {
+@@ -7505,8 +7505,8 @@ impl Input {
          });
  
          // Now handle the default (empty prefix) placeholder
@@ -202,7 +202,7 @@ index 980bafb..6319b53 100644
                  // agent_mode_hint_text now handles caching internally
                  let hint_text = self.agent_mode_hint_text(ctx);
                  self.editor.update(ctx, |editor, ctx| {
-@@ -10926,7 +10926,7 @@ impl Input {
+@@ -10953,7 +10953,7 @@ impl Input {
                      }
                  }
  
@@ -212,10 +212,10 @@ index 980bafb..6319b53 100644
                      && self.editor_starts_with_command_search_trigger(ctx)
                      && *edit_origin == EditOrigin::UserTyped
 diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
-index 8b0d7c1..af2c41b 100644
+index c25484f..37e2528 100644
 --- a/app/src/workspace/view.rs
 +++ b/app/src/workspace/view.rs
-@@ -24468,8 +24468,14 @@ impl TypedActionView for Workspace {
+@@ -24540,8 +24540,14 @@ impl TypedActionView for Workspace {
                  ctx.notify();
              }
              OpenSettingsFile => {

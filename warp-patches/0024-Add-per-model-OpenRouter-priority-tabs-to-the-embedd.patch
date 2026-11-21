@@ -1,7 +1,7 @@
-From 72012ed642f9db380acbe55abd9d90d574015094 Mon Sep 17 00:00:00 2001
+From d74a7f97cc38992a204c8fe1b098a3d5958d31d8 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 18:28:54 -0700
-Subject: [PATCH 24/74] Add per-model OpenRouter priority tabs to the embedded
+Subject: [PATCH 24/73] Add per-model OpenRouter priority tabs to the embedded
  AI settings
 
 A Balanced / Latency / Cost / Throughput segmented control under the fast
@@ -85,7 +85,7 @@ index 1cd9229..8c976cc 100644
          type: bool,
          default: true,
 diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
-index 50befb3..c97d32e 100644
+index 328b77e..c4ca396 100644
 --- a/app/src/settings_view/warp_agent_page.rs
 +++ b/app/src/settings_view/warp_agent_page.rs
 @@ -35,7 +35,7 @@ use warp_errors::report_if_error;
@@ -137,7 +137,7 @@ index 50befb3..c97d32e 100644
                          Box::new(host_expanded_effort_widget),
                          Box::new(HostAiPrivateRoutingWidget::default()),
                          Box::new(host_recent_commands_widget),
-@@ -7281,6 +7290,127 @@ impl SettingsWidget for HostAiModelWidget {
+@@ -7282,6 +7291,127 @@ impl SettingsWidget for HostAiModelWidget {
      }
  }
  

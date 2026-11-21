@@ -1,7 +1,7 @@
-From 8a8339ef5830d3854556ead35d5b2db4e9796cf6 Mon Sep 17 00:00:00 2001
+From 9fcb632f29fd40c603a1b8ec756a32712836f10e Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 16:05:13 -0700
-Subject: [PATCH 47/74] SSH Warpify on the web
+Subject: [PATCH 47/73] SSH Warpify on the web
 
 The host's shell runs on the user's machine, so the init line now sets the env the
 desktop PTY gets (WARP_IS_LOCAL_SHELL_SESSION, WARP_USE_SSH_WRAPPER from the Warpify
@@ -18,7 +18,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  3 files changed, 61 insertions(+), 6 deletions(-)
 
 diff --git a/app/src/terminal/model_events.rs b/app/src/terminal/model_events.rs
-index 4c73d53..d4f060c 100644
+index 8a460e5..d2670c0 100644
 --- a/app/src/terminal/model_events.rs
 +++ b/app/src/terminal/model_events.rs
 @@ -25,7 +25,6 @@ use crate::terminal::shell::ShellType;
@@ -30,7 +30,7 @@ index 4c73d53..d4f060c 100644
  }
  
 diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
-index e71ab03..9ea7a34 100644
+index 07beab7..b5f5d98 100644
 --- a/app/src/terminal/remote_tty/event_loop.rs
 +++ b/app/src/terminal/remote_tty/event_loop.rs
 @@ -8,6 +8,7 @@ use async_channel::{Receiver, Sender};
@@ -108,7 +108,7 @@ index e71ab03..9ea7a34 100644
                  {
                      report_error!(e.context("Failed to write env vars to pty"));
                  }
-@@ -457,15 +494,25 @@ impl EventLoop {
+@@ -459,15 +496,25 @@ impl EventLoop {
          sink: &mut impl Sink,
          shell_type: ShellType,
          is_honor_ps1_enabled: bool,

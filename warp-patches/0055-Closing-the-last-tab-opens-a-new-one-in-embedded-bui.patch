@@ -1,7 +1,7 @@
-From 0aa8459e8bf380b93685f70fad0afc3c08241d4f Mon Sep 17 00:00:00 2001
+From 04929bb712450919c4df778f2df5413c864dffa0 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Sun, 11 Oct 2026 14:37:44 -0700
-Subject: [PATCH 55/74] Closing the last tab opens a new one in embedded builds
+Subject: [PATCH 55/73] Closing the last tab opens a new one in embedded builds
 
 Closing the last tab closed the window, which left the embedded page
 dead (no window state, no input). Like a last tab whose shell exits, a
@@ -13,10 +13,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 19 insertions(+), 2 deletions(-)
 
 diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
-index 151d80e..a96eb2c 100644
+index 7971282..a862b0f 100644
 --- a/app/src/workspace/view.rs
 +++ b/app/src/workspace/view.rs
-@@ -12335,6 +12335,20 @@ impl Workspace {
+@@ -12337,6 +12337,20 @@ impl Workspace {
          self.vertical_tabs_panel
              .clear_detail_sidecar_if_for_pane_group(pane_group.id());
  
@@ -37,7 +37,7 @@ index 151d80e..a96eb2c 100644
          // If this is the last tab, close the window instead of actually removing
          // the tab.
          if self.tabs.len() == 1 {
-@@ -12540,7 +12554,9 @@ impl Workspace {
+@@ -12542,7 +12556,9 @@ impl Workspace {
          add_to_undo_stack: bool,
          ctx: &mut ViewContext<Self>,
      ) {
@@ -48,7 +48,7 @@ index 151d80e..a96eb2c 100644
          if !ContextFlag::CloseWindow.is_enabled() && is_last_tab {
              return;
          }
-@@ -25600,7 +25616,8 @@ impl TypedActionView for Workspace {
+@@ -25672,7 +25688,8 @@ impl TypedActionView for Workspace {
                  ctx.terminate_app(TerminationMode::Cancellable, None);
              }
              CloseWindow => {

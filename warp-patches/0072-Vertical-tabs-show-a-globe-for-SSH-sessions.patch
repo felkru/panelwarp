@@ -1,7 +1,7 @@
-From fd581ba910162a470700ed56f8abb52ac7f41e9f Mon Sep 17 00:00:00 2001
+From 8ac11ec04d5f7488c6c0c1e2da01612541e19b37 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <acc@felkru.com>
 Date: Wed, 18 Nov 2026 12:07:13 +0100
-Subject: [PATCH 73/74] Vertical tabs show a globe for SSH sessions
+Subject: [PATCH 72/73] Vertical tabs show a globe for SSH sessions
 
 A tab whose shell runs on another machine (a Warpified SSH subshell, a session whose host differs from the pane's first shell, or a running plain ssh, mosh, autossh or et command) shows a globe instead of the terminal glyph, in the tab row and the detail sidecar.
 
@@ -12,10 +12,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 43 insertions(+), 3 deletions(-)
 
 diff --git a/app/src/terminal/view.rs b/app/src/terminal/view.rs
-index b2e179d..b322567 100644
+index a6cd438..9c76ea0 100644
 --- a/app/src/terminal/view.rs
 +++ b/app/src/terminal/view.rs
-@@ -26904,6 +26904,39 @@ impl TerminalView {
+@@ -27224,6 +27224,39 @@ impl TerminalView {
          ctx.emit(Event::FileUploadFinished(exit_code))
      }
  

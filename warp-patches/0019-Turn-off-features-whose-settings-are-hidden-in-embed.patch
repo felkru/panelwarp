@@ -1,7 +1,7 @@
-From 3c21b17abdbaa6afcd7ee4f37197cd961bfa673d Mon Sep 17 00:00:00 2001
+From c14b04fcec3e36abc8f0c7bc079756aae581bea6 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 17:41:24 -0700
-Subject: [PATCH 19/74] Turn off features whose settings are hidden in embedded
+Subject: [PATCH 19/73] Turn off features whose settings are hidden in embedded
  builds
 
 Under remote_tty: no Warp AI (is_any_ai_enabled), no autoupdate,
@@ -20,11 +20,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  5 files changed, 37 insertions(+), 4 deletions(-)
 
 diff --git a/app/src/features.rs b/app/src/features.rs
-index 9bea598..64bf9c6 100644
+index b5c3ee1..afcd766 100644
 --- a/app/src/features.rs
 +++ b/app/src/features.rs
-@@ -531,5 +531,21 @@ fn enabled_features() -> HashSet<FeatureFlag> {
-         FeatureFlag::StoredScreenshots,
+@@ -549,5 +549,21 @@ fn enabled_features() -> HashSet<FeatureFlag> {
+         FeatureFlag::AcpHarness,
      ]);
  
 +    // Embedded builds have no updates, changelog, crash reporting or usage events, and no CLI
@@ -46,10 +46,10 @@ index 9bea598..64bf9c6 100644
      flags
  }
 diff --git a/app/src/settings/ai.rs b/app/src/settings/ai.rs
-index e0381ad..d8eef0e 100644
+index c5cbfcf..7efec69 100644
 --- a/app/src/settings/ai.rs
 +++ b/app/src/settings/ai.rs
-@@ -2275,7 +2275,9 @@ impl AISettings {
+@@ -2286,7 +2286,9 @@ impl AISettings {
              .get()
              .is_anonymous_or_logged_out();
  
@@ -75,10 +75,10 @@ index ab93663..4f776aa 100644
          log::warn!("Unable to parse the current url");
          return;
 diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
-index 0b22e8b..d1b2931 100644
+index a411766..fa888f2 100644
 --- a/app/src/workspace/view.rs
 +++ b/app/src/workspace/view.rs
-@@ -23714,9 +23714,10 @@ impl Workspace {
+@@ -23786,9 +23786,10 @@ impl Workspace {
                  .insert(flags::AI_COMMAND_SEARCH_HASH_TRIGGER_FLAG);
          }
  

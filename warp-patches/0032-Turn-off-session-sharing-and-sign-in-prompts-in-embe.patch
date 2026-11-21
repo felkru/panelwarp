@@ -1,7 +1,7 @@
-From cad75f454d2362a7e9a0270059d45e792787f8f4 Mon Sep 17 00:00:00 2001
+From 1dc18bbe1bbe01c09ca4434fa5d2b7d0eda99148 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 01:57:42 -0700
-Subject: [PATCH 32/74] Turn off session sharing and sign-in prompts in
+Subject: [PATCH 32/73] Turn off session sharing and sign-in prompts in
  embedded builds
 
 Embedded builds have no Warp account, so session sharing (creating, viewing, agent sessions) is
@@ -53,11 +53,11 @@ index 53a67f7..7d0cc77 100644
          let _ = ctx.spawn(
              async move { auth_client.fetch_new_custom_token().await },
 diff --git a/app/src/features.rs b/app/src/features.rs
-index 64bf9c6..ab0effc 100644
+index afcd766..3bafcdc 100644
 --- a/app/src/features.rs
 +++ b/app/src/features.rs
-@@ -531,13 +531,16 @@ fn enabled_features() -> HashSet<FeatureFlag> {
-         FeatureFlag::StoredScreenshots,
+@@ -549,13 +549,16 @@ fn enabled_features() -> HashSet<FeatureFlag> {
+         FeatureFlag::AcpHarness,
      ]);
  
 -    // Embedded builds have no updates, changelog, crash reporting or usage events, and no CLI
@@ -90,10 +90,10 @@ index a3c171b..6103bc9 100644
              Self::SessionSharingControl => {
                  FeatureFlag::CreatingSharedSessions.set_enabled(false);
 diff --git a/app/src/workspaces/user_workspaces/mod.rs b/app/src/workspaces/user_workspaces/mod.rs
-index 45bd8eb..11fca44 100644
+index 974b1d7..de57f77 100644
 --- a/app/src/workspaces/user_workspaces/mod.rs
 +++ b/app/src/workspaces/user_workspaces/mod.rs
-@@ -1689,7 +1689,8 @@ impl UserWorkspaces {
+@@ -1693,7 +1693,8 @@ impl UserWorkspaces {
  
      /// Updates whether or not session sharing is enabled based on the current team's tier policy.
      fn update_session_sharing_enablement(&self, ctx: &AppContext) {

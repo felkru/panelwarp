@@ -1,7 +1,7 @@
-From 206f2f9ba874050b1e4c5d0980a8154915423bb5 Mon Sep 17 00:00:00 2001
+From 3ee77940a9246e86f79784b3d8d32985fe62bc5b Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 17:56:25 -0700
-Subject: [PATCH 20/74] Queue a submitted command while an in-band command
+Subject: [PATCH 20/73] Queue a submitted command while an in-band command
  holds the shell
 
 Enter was silently dropped when a completions generator (an in-band
@@ -15,10 +15,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 61 insertions(+), 2 deletions(-)
 
 diff --git a/app/src/terminal/input.rs b/app/src/terminal/input.rs
-index 2e12ac0..8db11ec 100644
+index a0c0b27..a1ae856 100644
 --- a/app/src/terminal/input.rs
 +++ b/app/src/terminal/input.rs
-@@ -7801,6 +7801,65 @@ impl Input {
+@@ -7827,6 +7827,65 @@ impl Input {
          });
      }
  
@@ -38,7 +38,7 @@ index 2e12ac0..8db11ec 100644
 +                    && model.block_list().active_block().is_in_band_command_block()
 +            };
 +            if in_band_command_running && !reason.is_existing_active_command() {
-+                self.has_pending_command = true;
++                self.pending_command = Some(PendingCommand::InputBuffer);
 +                self.editor.update(ctx, |editor, ctx| {
 +                    editor.set_interaction_state(InteractionState::Selectable, ctx);
 +                });
@@ -58,11 +58,11 @@ index 2e12ac0..8db11ec 100644
 +        let _ = ctx.spawn(
 +            async move { warpui::r#async::Timer::after(RETRY_INTERVAL).await },
 +            move |input, _, ctx| {
-+                if !input.has_pending_command {
++                if !input.has_pending_command() {
 +                    return;
 +                }
 +                input.execute_pending_command(ctx);
-+                if !input.has_pending_command {
++                if !input.has_pending_command() {
 +                    return;
 +                }
 +                if attempt + 1 < MAX_ATTEMPTS {
@@ -72,7 +72,7 @@ index 2e12ac0..8db11ec 100644
 +                        "Gave up running a queued command: {:?}",
 +                        input.can_execute_command(ctx)
 +                    );
-+                    input.has_pending_command = false;
++                    input.pending_command = None;
 +                    input.editor.update(ctx, |editor, ctx| {
 +                        editor.set_interaction_state(InteractionState::Editable, ctx);
 +                    });
@@ -84,7 +84,7 @@ index 2e12ac0..8db11ec 100644
      pub fn try_execute_command(&mut self, command: &str, ctx: &mut ViewContext<Self>) -> bool {
          self.try_execute_command_with_options(command, false, ctx)
      }
-@@ -9074,7 +9133,7 @@ impl Input {
+@@ -9101,7 +9160,7 @@ impl Input {
                  self.close_input_suggestions(/*should_focus_input=*/ true, ctx);
  
                  let command = self.get_command(ctx);
@@ -93,7 +93,7 @@ index 2e12ac0..8db11ec 100644
  
                  ctx.emit_a11y_content(AccessibilityContent::new_without_help(
                      format!("Executed: {command}"),
-@@ -14276,7 +14335,7 @@ impl Input {
+@@ -14307,7 +14366,7 @@ impl Input {
              }
  
              let command = self.get_command(ctx);

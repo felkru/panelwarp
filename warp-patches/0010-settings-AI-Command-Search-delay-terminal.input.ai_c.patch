@@ -1,7 +1,7 @@
-From cbfe0f10c261a86093d41d18e048a5b8f1006025 Mon Sep 17 00:00:00 2001
+From a869b9ede8878c9882287bb0f2aeab42298f10d9 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 13:54:27 -0700
-Subject: [PATCH 10/74] settings: AI Command Search delay
+Subject: [PATCH 10/73] settings: AI Command Search delay
  (terminal.input.ai_command_search_debounce_ms)
 
 Dropdown under the '#' toggle (50/200/400/800/1500 ms). Defaults to 400 ms in embedded builds,
@@ -70,7 +70,7 @@ index 7fc5a27..fc51e22 100644
              type: bool,
              default: true,
 diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
-index 62ecc3a..99724b8 100644
+index ea3da9d..1b9d3ff 100644
 --- a/app/src/settings_view/warp_agent_page.rs
 +++ b/app/src/settings_view/warp_agent_page.rs
 @@ -95,7 +95,7 @@ use crate::server::telemetry::{

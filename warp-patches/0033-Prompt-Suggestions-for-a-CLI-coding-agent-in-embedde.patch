@@ -1,7 +1,7 @@
-From 26680b50f08fe5c5a063afa3b3dbdba291f1e224 Mon Sep 17 00:00:00 2001
+From 234c58128fb996a0a26d654651cd1219ba3467bb Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 02:22:11 -0700
-Subject: [PATCH 33/74] Prompt Suggestions for a CLI coding agent in embedded
+Subject: [PATCH 33/73] Prompt Suggestions for a CLI coding agent in embedded
  builds
 
 Embedded (remote_tty) builds have no Warp agent, so Prompt Suggestions now
@@ -97,10 +97,10 @@ index 43561bd..b64bd29 100644
  /// (`window.warpPanelConfirm(message, detail, confirmLabel)`, resolving to a boolean). Resolves
  /// to false if the host doesn't provide it or the user cancels.
 diff --git a/app/src/server/server_api.rs b/app/src/server/server_api.rs
-index 44e0ec0..04c17f6 100644
+index d7762c1..e8dd3ca 100644
 --- a/app/src/server/server_api.rs
 +++ b/app/src/server/server_api.rs
-@@ -1249,6 +1249,29 @@ impl ServerApi {
+@@ -1235,6 +1235,29 @@ impl ServerApi {
          request: &GenerateAMQuerySuggestionsRequest,
          team_scope: RequestTeamScope,
      ) -> Result<generate_am_query_suggestions::GenerateAMQuerySuggestionsResponse, AIApiError> {
@@ -131,10 +131,10 @@ index 44e0ec0..04c17f6 100644
  
          cfg_if::cfg_if! {
 diff --git a/app/src/settings/ai.rs b/app/src/settings/ai.rs
-index ba2ef99..a841720 100644
+index 64483ed..15e4bf8 100644
 --- a/app/src/settings/ai.rs
 +++ b/app/src/settings/ai.rs
-@@ -2352,6 +2352,17 @@ impl AISettings {
+@@ -2363,6 +2363,17 @@ impl AISettings {
              && AppExecutionMode::as_ref(app).allows_active_ai()
      }
  
@@ -302,7 +302,7 @@ index afe8cbc..17015de 100644
 -    }
 -}
 diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
-index 610a5df..cf65a5a 100644
+index 1d31aa2..6ce0420 100644
 --- a/app/src/settings_view/warp_agent_page.rs
 +++ b/app/src/settings_view/warp_agent_page.rs
 @@ -54,7 +54,7 @@ use warpui::{
@@ -369,7 +369,7 @@ index 610a5df..cf65a5a 100644
              WarpAgentPageAction::ToggleHostAiPrivateRouting => {
                  let set_private_routing = |enabled: bool, ctx: &mut ViewContext<Self>| {
                      HostAiSettings::handle(ctx).update(ctx, |settings, ctx| {
-@@ -7559,6 +7567,112 @@ impl SettingsWidget for HostAiNextCommandWidget {
+@@ -7560,6 +7568,112 @@ impl SettingsWidget for HostAiNextCommandWidget {
      }
  }
  
@@ -483,10 +483,10 @@ index 610a5df..cf65a5a 100644
  
  /// How many recent commands go along with `#` requests (only with private routing on).
 diff --git a/app/src/terminal/view.rs b/app/src/terminal/view.rs
-index 107c11c..fcf879d 100644
+index bcfce7f..4a315d1 100644
 --- a/app/src/terminal/view.rs
 +++ b/app/src/terminal/view.rs
-@@ -10721,7 +10721,35 @@ impl TerminalView {
+@@ -10766,7 +10766,35 @@ impl TerminalView {
              }
          };
  

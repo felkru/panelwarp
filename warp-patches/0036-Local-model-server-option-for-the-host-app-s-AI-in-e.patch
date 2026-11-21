@@ -1,7 +1,7 @@
-From 2cf0442c4621586f79cb9c39887f895aa0c879fc Mon Sep 17 00:00:00 2001
+From 0f15a2d32c0fbb18d0aa70711ff017ed55dd1229 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 02:46:18 -0700
-Subject: [PATCH 36/74] Local model server option for the host app's AI in
+Subject: [PATCH 36/73] Local model server option for the host app's AI in
  embedded builds
 
 Adds `host.ai.local_model` (empty by default) and `host.ai.local_server` (LM Studio's
@@ -47,7 +47,7 @@ index da8c1dd..8489d3b 100644
          type: bool,
          default: false,
 diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
-index cf65a5a..fa6b10d 100644
+index 6ce0420..a5b5966 100644
 --- a/app/src/settings_view/warp_agent_page.rs
 +++ b/app/src/settings_view/warp_agent_page.rs
 @@ -2310,6 +2310,8 @@ impl WarpAgentPageView {
@@ -68,7 +68,7 @@ index cf65a5a..fa6b10d 100644
                      ],
                  ),
                  Category::new(
-@@ -7613,6 +7617,99 @@ impl SettingsWidget for HostAiPromptSuggestionsWidget {
+@@ -7614,6 +7618,99 @@ impl SettingsWidget for HostAiPromptSuggestionsWidget {
      }
  }
  

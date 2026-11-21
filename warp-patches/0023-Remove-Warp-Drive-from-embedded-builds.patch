@@ -1,7 +1,7 @@
-From b5896cca171338e99dfc9e55b429be5d1d2a7e4b Mon Sep 17 00:00:00 2001
+From c1a6bc45607ac741daa13e466df758e24dcf2b90 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 18:26:19 -0700
-Subject: [PATCH 23/74] Remove Warp Drive from embedded builds
+Subject: [PATCH 23/73] Remove Warp Drive from embedded builds
 
 Warp Drive needs a Warp account, which embedded (remote_tty) builds never
 have: it is now never available there, its keybindings and openers are
@@ -63,10 +63,10 @@ index 6a26753..49a5868 100644
      ]);
  
 diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
-index 326c70b..5470663 100644
+index c4db262..6e570c6 100644
 --- a/app/src/workspace/view.rs
 +++ b/app/src/workspace/view.rs
-@@ -9516,6 +9516,9 @@ impl Workspace {
+@@ -9518,6 +9518,9 @@ impl Workspace {
          explicit_user_action: bool,
          ctx: &mut ViewContext<Self>,
      ) {
@@ -76,7 +76,7 @@ index 326c70b..5470663 100644
          // Closing all left panels will also close warp drive so we need to retrieve
          // whether warp drive was open first, and toggle based on the initial value.
          let was_warp_drive_open = self.current_workspace_state.is_warp_drive_open;
-@@ -14792,6 +14795,9 @@ impl Workspace {
+@@ -14861,6 +14864,9 @@ impl Workspace {
      }
  
      fn open_warp_drive_palette(&mut self, ctx: &mut ViewContext<Self>) {

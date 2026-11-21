@@ -1,7 +1,7 @@
-From 06b23885bd7807dc6cff25fda77ddf89e7a5310d Mon Sep 17 00:00:00 2001
+From a436972b3f50ec713079210ff16e38a38adc0cc6 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 16:16:55 -0700
-Subject: [PATCH 18/74] Remove Warp Agent entry points in embedded builds
+Subject: [PATCH 18/73] Remove Warp Agent entry points in embedded builds
 
 No agent view (cmd+enter, /agent), no agent hint message bar, no zero
 state block, and no slash command or @ menus in the terminal input.
@@ -101,10 +101,10 @@ index 4263a94..df6f8f0 100644
      }
  }
 diff --git a/app/src/terminal/input.rs b/app/src/terminal/input.rs
-index 6319b53..2e12ac0 100644
+index ff084b5..a0c0b27 100644
 --- a/app/src/terminal/input.rs
 +++ b/app/src/terminal/input.rs
-@@ -17028,10 +17028,7 @@ impl View for Input {
+@@ -17125,10 +17125,7 @@ impl View for Input {
              ctx.set.insert(flags::IS_ANY_AI_ENABLED);
          }
  
@@ -169,10 +169,10 @@ index 9cd726d..d518c72 100644
              return Some(AtContextMenuDisabledReason::DisabledInTerminalMode);
          }
 diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
-index af2c41b..0b22e8b 100644
+index 37e2528..a411766 100644
 --- a/app/src/workspace/view.rs
 +++ b/app/src/workspace/view.rs
-@@ -23702,10 +23702,10 @@ impl Workspace {
+@@ -23774,10 +23774,10 @@ impl Workspace {
                  .insert(flags::SHOW_TERMINAL_INPUT_MESSAGE_LINE_FLAG);
          }
  

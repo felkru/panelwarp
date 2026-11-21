@@ -1,7 +1,7 @@
-From 9acae878b47ba9a7f8e8fc4b79e7bd5e0a7b50ba Mon Sep 17 00:00:00 2001
+From 5b99741481ca8d1a237132bb55ff1cfaedab32ef Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <acc@felkru.com>
 Date: Wed, 18 Nov 2026 10:16:01 +0100
-Subject: [PATCH 69/74] Privacy page: Sync settings toggle for the host app
+Subject: [PATCH 68/73] Privacy page: Sync settings toggle for the host app
 
 Embedded builds get a host.settings_sync setting (on by default, kept per machine) and a "Sync settings" switch above "Sync command history" on the Privacy page. The host app syncs Warp's settings and keybindings through VS Code Settings Sync while it is on.
 

@@ -1,7 +1,7 @@
-From 611795d88b1138bc961778fe700c964e2f08d98e Mon Sep 17 00:00:00 2001
+From 76ecd4b87a1138f384d221886a00e43b87491cfa Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Mon, 19 Oct 2026 01:16:37 -0700
-Subject: [PATCH 64/74] Reopen a closed tab with its running shell in embedded
+Subject: [PATCH 64/73] Reopen a closed tab with its running shell in embedded
  builds
 
 Closing a tab whose command was still running shut that pane's PTY down right away, as on
@@ -17,16 +17,16 @@ ends the shell.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- app/src/terminal/remote_tty/event_loop.rs       |  9 +++++++--
+ app/src/terminal/remote_tty/event_loop.rs       | 11 +++++++----
  app/src/terminal/remote_tty/terminal_manager.rs | 14 ++++++++++++++
  app/src/workspace/view.rs                       | 16 ++++++++++------
- 3 files changed, 31 insertions(+), 8 deletions(-)
+ 3 files changed, 31 insertions(+), 10 deletions(-)
 
 diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
-index 28aa4e8..3cb5b21 100644
+index bfab760..ba6b0c6 100644
 --- a/app/src/terminal/remote_tty/event_loop.rs
 +++ b/app/src/terminal/remote_tty/event_loop.rs
-@@ -430,6 +430,7 @@ impl EventLoop {
+@@ -431,6 +431,7 @@ impl EventLoop {
                      }
  
                      for message in batch {
@@ -34,7 +34,7 @@ index 28aa4e8..3cb5b21 100644
                          let Some(outgoing) = Self::to_outgoing(message) else {
                              continue;
                          };
-@@ -456,6 +457,9 @@ impl EventLoop {
+@@ -457,6 +458,9 @@ impl EventLoop {
                                  Err(_) => return,
                              }
                          }
@@ -44,15 +44,17 @@ index 28aa4e8..3cb5b21 100644
                      }
                  }
              })
-@@ -484,8 +488,9 @@ impl EventLoop {
+@@ -485,10 +489,9 @@ impl EventLoop {
                  // make this distinction.
                  Some(Outgoing::Text(serialized))
              }
 -            // TODO(alokedesai): Implement shutdown on the network backed PTY.
--            EventLoopMessage::Shutdown | EventLoopMessage::ChildExited => None,
+-            EventLoopMessage::Shutdown
+-            | EventLoopMessage::ShutdownForReplacement
+-            | EventLoopMessage::ChildExited => None,
 +            // The PTY host ends the shell (the pane was closed for good).
 +            EventLoopMessage::Shutdown => Some(Outgoing::Text(r#"{"close":true}"#.to_owned())),
-+            EventLoopMessage::ChildExited => None,
++            EventLoopMessage::ShutdownForReplacement | EventLoopMessage::ChildExited => None,
          }
      }
  
@@ -103,10 +105,10 @@ index f8814d6..b532c23 100644
          self
      }
 diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
-index e56118a..23eaaed 100644
+index 2b177c7..a8a803a 100644
 --- a/app/src/workspace/view.rs
 +++ b/app/src/workspace/view.rs
-@@ -12428,14 +12428,18 @@ impl Workspace {
+@@ -12430,14 +12430,18 @@ impl Workspace {
          if !re_adopted && detach_panes_for_close {
              let working_directories_model = self.working_directories_model.clone();
              pane_group.update(ctx, |pane_group, ctx| {

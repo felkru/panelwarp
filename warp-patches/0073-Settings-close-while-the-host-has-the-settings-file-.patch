@@ -1,7 +1,7 @@
-From 915430cb7125b4d7378d86030776322f756de845 Mon Sep 17 00:00:00 2001
+From d51a6a1681c9007f8e33d94efda55a848a5d89e0 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <acc@felkru.com>
 Date: Wed, 18 Nov 2026 12:07:13 +0100
-Subject: [PATCH 74/74] Settings close while the host has the settings file
+Subject: [PATCH 73/73] Settings close while the host has the settings file
  open
 
 The host calls window.warpPanelCloseSettings() when it opens settings.toml or keybindings.yaml, which closes the settings tab. While the file stays open, opening settings asks the host (warpPanelSettingsFileOpen / warpPanelRequestSettings) to close the file first; the host then reopens settings at the requested page with window.warpPanelOpenSettingsPage(slug), so settings always show what the file says. The too-narrow settings message gets an Open settings file button at the bottom center.
@@ -16,10 +16,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  5 files changed, 165 insertions(+), 36 deletions(-)
 
 diff --git a/app/src/lib.rs b/app/src/lib.rs
-index fe81ff7..6d4d65c 100644
+index 136a0e3..7cc8f27 100644
 --- a/app/src/lib.rs
 +++ b/app/src/lib.rs
-@@ -2093,6 +2093,8 @@ pub(crate) fn initialize_app(
+@@ -2208,6 +2208,8 @@ pub(crate) fn initialize_app(
      ctx.add_singleton_model(crate::platform::wasm::host_session::Autosave::new);
      #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
      ctx.add_singleton_model(crate::platform::wasm::host_settings::Reload::new);
@@ -137,10 +137,10 @@ index 46c172b..cc6ba42 100644
 +    impl warpui::SingletonEntity for PaneHooks {}
  }
 diff --git a/app/src/settings_view/mod.rs b/app/src/settings_view/mod.rs
-index 2fbbe17..5053dcf 100644
+index 6dd2b47..17d2e62 100644
 --- a/app/src/settings_view/mod.rs
 +++ b/app/src/settings_view/mod.rs
-@@ -2481,44 +2481,57 @@ impl SettingsView {
+@@ -2482,44 +2482,57 @@ impl SettingsView {
  
      /// Shown instead of the settings in embedded builds when the panel is narrower than
      /// [`MIN_SETTINGS_WIDTH_EMBEDDED`].
@@ -233,7 +233,7 @@ index 2fbbe17..5053dcf 100644
          .finish()
      }
  
-@@ -2756,7 +2769,7 @@ impl View for SettingsView {
+@@ -2757,7 +2770,7 @@ impl View for SettingsView {
                  row,
                  vec![(
                      SizeConstraintCondition::WidthLessThan(MIN_SETTINGS_WIDTH_EMBEDDED),
@@ -257,10 +257,10 @@ index 3e0aee8..46f553f 100644
      /// description), so scroll position survives renders.
      pub alert_text_scroll_state: ClippedScrollStateHandle,
 diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
-index 23eaaed..d40dba0 100644
+index a8a803a..a7e0453 100644
 --- a/app/src/workspace/view.rs
 +++ b/app/src/workspace/view.rs
-@@ -8898,6 +8898,13 @@ impl Workspace {
+@@ -8900,6 +8900,13 @@ impl Workspace {
          search_query: Option<&str>,
          ctx: &mut ViewContext<Self>,
      ) {
@@ -274,7 +274,7 @@ index 23eaaed..d40dba0 100644
          // Ensure there is only one settings pane per window
          let settings_pane_manager = SettingsPaneManager::handle(ctx);
          if let Some(locator) = settings_pane_manager.as_ref(ctx).find_pane(ctx.window_id()) {
-@@ -8946,6 +8953,25 @@ impl Workspace {
+@@ -8948,6 +8955,25 @@ impl Workspace {
          );
      }
  

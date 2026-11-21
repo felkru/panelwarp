@@ -1,7 +1,7 @@
-From 3aae901711c0b06837e0c0e71dff3ab0594582c1 Mon Sep 17 00:00:00 2001
+From 05f500bea29517136b3db49af4f91cf7fdb509d5 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 18:23:47 -0700
-Subject: [PATCH 22/74] Replace the tools panel with an Agents panel in
+Subject: [PATCH 22/73] Replace the tools panel with an Agents panel in
  embedded builds
 
 Lists the machine's recent Claude Code, Codex and Gemini CLI conversations
@@ -206,7 +206,7 @@ index 961c2dc..b247c8d 100644
              Self::AgentManagement => Icon::Grid,
              Self::CodeReview => Icon::Diff,
 diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
-index d1b2931..326c70b 100644
+index fa888f2..c4db262 100644
 --- a/app/src/workspace/view.rs
 +++ b/app/src/workspace/view.rs
 @@ -1,4 +1,5 @@
@@ -215,7 +215,7 @@ index d1b2931..326c70b 100644
  pub(crate) mod auto_handoff_sleep_modal;
  mod build_plan_migration_modal;
  pub(crate) mod chatgpt_plan_modal;
-@@ -4391,6 +4392,7 @@ impl Workspace {
+@@ -4393,6 +4394,7 @@ impl Workspace {
                  },
                  LeftPanelDisplayedTab::WarpDrive => ToolPanelView::WarpDrive,
                  LeftPanelDisplayedTab::ConversationListView => ToolPanelView::ConversationListView,
@@ -223,7 +223,7 @@ index d1b2931..326c70b 100644
              };
              lp.restore_active_view_from_snapshot(active_view, ctx);
              lp.set_active_pane_group(pane_group.clone(), &self.working_directories_model, ctx);
-@@ -6792,6 +6794,11 @@ impl Workspace {
+@@ -6794,6 +6796,11 @@ impl Workspace {
                      ctx,
                  );
              }
@@ -235,7 +235,7 @@ index d1b2931..326c70b 100644
              LeftPanelEvent::SignInRequested => {
                  self.open_require_login_modal(AuthViewVariant::RequireLoginCloseable, ctx);
                  self.require_login_modal.update(ctx, |modal, ctx| {
-@@ -20752,6 +20759,7 @@ impl Workspace {
+@@ -20821,6 +20828,7 @@ impl Workspace {
                          ToolPanelView::GlobalSearch { .. } => "Global search",
                          ToolPanelView::WarpDrive => "Warp Drive",
                          ToolPanelView::ConversationListView => "Agent conversations",
@@ -243,7 +243,7 @@ index d1b2931..326c70b 100644
                      }
                  } else {
                      "Tools panel"
-@@ -20806,17 +20814,23 @@ impl Workspace {
+@@ -20875,17 +20883,23 @@ impl Workspace {
                  ToolPanelView::GlobalSearch { .. } => "Global search",
                  ToolPanelView::WarpDrive => "Warp Drive",
                  ToolPanelView::ConversationListView => "Agent conversations",
@@ -268,7 +268,7 @@ index d1b2931..326c70b 100644
                          &self.mouse_states.tools_panel_icon,
                          WorkspaceAction::ToggleLeftPanel,
                          tooltip_text.to_string(),
-@@ -23998,6 +24012,10 @@ impl Workspace {
+@@ -24070,6 +24084,10 @@ impl Workspace {
  
      /// Computes the list of available left panel views based on current AI settings and feature flags.
      fn compute_left_panel_views(ctx: &AppContext) -> Vec<ToolPanelView> {

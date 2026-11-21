@@ -1,7 +1,7 @@
-From d3a2e45314b0027fc54439c61a4c507adab6d61a Mon Sep 17 00:00:00 2001
+From 74cba3fbab068a73abd3bbd4e0c850acb6690e2d Mon Sep 17 00:00:00 2001
 From: Alex Brodsky <122503996+Albro3459@users.noreply.github.com>
 Date: Fri, 6 Nov 2026 12:30:32 -0600
-Subject: [PATCH 66/74] Reload settings and keybindings when the web host asks
+Subject: [PATCH 66/73] Reload settings and keybindings when the web host asks
 
 Desktop Warp applies settings.toml edits while it runs, but the web
 build only reads localStorage at startup, so an embedding host that
@@ -76,10 +76,10 @@ index b638e36..94c6d35 100644
  /// using the name of the editable binding and the new keystrokes
  /// if keystrokes is UserDefinedKeybinding::Removed
 diff --git a/app/src/lib.rs b/app/src/lib.rs
-index c8bcf54..fe81ff7 100644
+index 7c1c743..136a0e3 100644
 --- a/app/src/lib.rs
 +++ b/app/src/lib.rs
-@@ -2091,6 +2091,8 @@ pub(crate) fn initialize_app(
+@@ -2206,6 +2206,8 @@ pub(crate) fn initialize_app(
      ctx.add_singleton_model(move |_| History::new(command_history));
      #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
      ctx.add_singleton_model(crate::platform::wasm::host_session::Autosave::new);

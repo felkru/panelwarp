@@ -1,7 +1,7 @@
-From b395ebfd885e369b8c7651909f84be9dab198dae Mon Sep 17 00:00:00 2001
+From 054cad56bf5b2951c02f69b91dc495ed949f2182 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 14:58:42 -0700
-Subject: [PATCH 39/74] Keep Warp's in-band commands out of fish history
+Subject: [PATCH 39/73] Keep Warp's in-band commands out of fish history
 
 Warp starts in-band commands in fish with a space, relying on fish leaving such commands out of
 history. Defining fish_should_add_to_history (which the bootstrap does) turns that rule off, so
@@ -14,10 +14,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 3 insertions(+)
 
 diff --git a/app/assets/bundled/bootstrap/fish.sh b/app/assets/bundled/bootstrap/fish.sh
-index 4f323a9..a96d9e0 100644
+index ecce812..edea3ee 100644
 --- a/app/assets/bundled/bootstrap/fish.sh
 +++ b/app/assets/bundled/bootstrap/fish.sh
-@@ -660,6 +660,9 @@ else if not functions -q warp_original_fish_should_add_to_history
+@@ -674,6 +674,9 @@ else if not functions -q warp_original_fish_should_add_to_history
    end
  end
  function fish_should_add_to_history

@@ -1,7 +1,7 @@
-From 0ce4b132a053a2f2df617b265488887e6dfe532a Mon Sep 17 00:00:00 2001
+From 083f1706f82fc9b06d181b107f9bf36f9e266065 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 14:48:04 -0700
-Subject: [PATCH 13/74] Two-stage AI command search and OpenRouter key row for
+Subject: [PATCH 13/73] Two-stage AI command search and OpenRouter key row for
  embedded builds
 
 Embedded (remote_tty) builds register the Warp AI async source twice: a fast
@@ -155,10 +155,10 @@ index d64bd01..9822015 100644
              match res {
                  Ok(ai_commands) => {
 diff --git a/app/src/server/server_api/ai.rs b/app/src/server/server_api/ai.rs
-index 202bc66..e1eee30 100644
+index d74ee75..b2e5274 100644
 --- a/app/src/server/server_api/ai.rs
 +++ b/app/src/server/server_api/ai.rs
-@@ -1940,7 +1940,7 @@ impl AIClient for ServerApi {
+@@ -2372,7 +2372,7 @@ impl AIClient for ServerApi {
      ) -> Result<Vec<AIGeneratedCommand>, GenerateCommandsFromNaturalLanguageError> {
          // Embedded builds answer with the host app's own AI provider (bring-your-own-key).
          #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
@@ -185,7 +185,7 @@ index fc51e22..4263a94 100644
              sync_to_cloud: SyncToCloud::Globally(RespectUserSyncSetting::Yes),
              surface: settings::SettingSurfaces::GUI,
 diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
-index 99724b8..204d911 100644
+index 1b9d3ff..20d98a2 100644
 --- a/app/src/settings_view/warp_agent_page.rs
 +++ b/app/src/settings_view/warp_agent_page.rs
 @@ -3810,8 +3810,8 @@ impl SettingsWidget for AiCommandSearchDebounceWidget {
@@ -199,7 +199,7 @@ index 99724b8..204d911 100644
              ),
              None,
              LocalOnlyIconState::for_setting(
-@@ -6912,10 +6912,10 @@ pub(crate) fn host_api_key_widget_id() -> &'static str {
+@@ -6913,10 +6913,10 @@ pub(crate) fn host_api_key_widget_id() -> &'static str {
      HostApiKeyWidget::static_widget_id()
  }
  
@@ -212,7 +212,7 @@ index 99724b8..204d911 100644
  /// app, which stores it (VS Code: SecretStorage); Warp never keeps it.
  struct HostApiKeyWidget {
      editor: ViewHandle<EditorView>,
-@@ -6953,7 +6953,7 @@ impl HostApiKeyWidget {
+@@ -6954,7 +6954,7 @@ impl HostApiKeyWidget {
                  return;
              }
              #[cfg(target_family = "wasm")]
@@ -221,7 +221,7 @@ index 99724b8..204d911 100644
              #[cfg(not(target_family = "wasm"))]
              let saved = false;
              if saved {
-@@ -6971,7 +6971,7 @@ impl SettingsWidget for HostApiKeyWidget {
+@@ -6972,7 +6972,7 @@ impl SettingsWidget for HostApiKeyWidget {
      type View = WarpAgentPageView;
  
      fn search_terms(&self) -> &str {
@@ -230,7 +230,7 @@ index 99724b8..204d911 100644
      }
  
      fn render(
-@@ -6991,14 +6991,14 @@ impl SettingsWidget for HostApiKeyWidget {
+@@ -6992,14 +6992,14 @@ impl SettingsWidget for HostApiKeyWidget {
              ..Default::default()
          };
          let label = Text::new_inline(

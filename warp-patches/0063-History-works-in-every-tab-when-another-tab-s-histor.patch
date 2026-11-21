@@ -1,7 +1,7 @@
-From 99af99046c7a385bfbdc75c1472ba7943e1a5645 Mon Sep 17 00:00:00 2001
+From 8e93e1b494ddabf0dc243eec892d42287c8f2776 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Mon, 19 Oct 2026 00:38:18 -0700
-Subject: [PATCH 63/74] History works in every tab when another tab's history
+Subject: [PATCH 63/73] History works in every tab when another tab's history
  read hangs
 
 Up-arrow history read the shell's history file once per user/host/shell, through the first

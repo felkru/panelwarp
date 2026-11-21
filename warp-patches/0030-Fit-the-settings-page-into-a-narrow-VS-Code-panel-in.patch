@@ -1,7 +1,7 @@
-From 3a41f2216dabafec97392871ce1f74f1147af972 Mon Sep 17 00:00:00 2001
+From 70bca4526f9b6e17ee5385c183aa3f5fe7106da4 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 01:33:13 -0700
-Subject: [PATCH 30/74] Fit the settings page into a narrow VS Code panel in
+Subject: [PATCH 30/73] Fit the settings page into a narrow VS Code panel in
  embedded builds
 
 In the panel (~780 px wide) the page's 520 px minimum width pushed every row
@@ -16,7 +16,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 11 insertions(+), 2 deletions(-)
 
 diff --git a/app/src/settings_view/mod.rs b/app/src/settings_view/mod.rs
-index bb414dd..3b8e765 100644
+index e5742d1..1252617 100644
 --- a/app/src/settings_view/mod.rs
 +++ b/app/src/settings_view/mod.rs
 @@ -154,12 +154,19 @@ const SIDEBAR_WIDTH_DEFAULT: f32 = 200.;

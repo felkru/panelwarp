@@ -1,7 +1,7 @@
-From a358a1e9597bd0bcaeb8e7b031db4b9594a50f93 Mon Sep 17 00:00:00 2001
+From 5d322ab5406631b3abaa5ba89ea1a0c0e1afd16c Mon Sep 17 00:00:00 2001
 From: Alex Brodsky <122503996+Albro3459@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 17:58:15 -0800
-Subject: [PATCH 70/74] File links skip output from sessions on other machines
+Subject: [PATCH 69/73] File links skip output from sessions on other machines
 
 Warp's web build counts every session as remote, so it handed the host page paths from SSH and container sessions too. The host checked them on its own machine and underlined files that happened to exist there, like /etc/hosts or ~/.zshrc, and Cmd+click opened the wrong machine's file. A block now gets no file links when its host differs from the pane's first shell, found by following each session's spawning session up from the prompt. A block keeps the host it recorded, so restored blocks are covered too. An unknown host keeps the old behaviour, and plain ssh without Warpify still links, since its output belongs to the local shell. Desktop is unchanged
 

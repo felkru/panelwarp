@@ -1,7 +1,7 @@
-From 0c6460739f4f4d24ad3a94628f7909e38ee26b12 Mon Sep 17 00:00:00 2001
+From 6108a3c908230b6acdb64808594388fa4c2b5294 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 15:41:03 -0700
-Subject: [PATCH 44/74] Clickable file paths on the web via the host
+Subject: [PATCH 44/73] Clickable file paths on the web via the host
 
 The web build has no filesystem, so link detection sends the possible paths under
 the mouse to the host (the VS Code extension), which stats them; Cmd-click and the
@@ -21,10 +21,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 app/src/util/file_link.rs
 
 diff --git a/app/Cargo.toml b/app/Cargo.toml
-index df3ee05..ba195ff 100644
+index 5b1f9f0..8c745e3 100644
 --- a/app/Cargo.toml
 +++ b/app/Cargo.toml
-@@ -811,6 +811,9 @@ mcp_debugging_ids = []
+@@ -824,6 +824,9 @@ mcp_debugging_ids = []
  oz_changelog_updates = []
  # Remote-backed tty that connects to a PTY-like interface via a server.
  remote_tty = ["warp_terminal/remote_tty"]
@@ -126,10 +126,10 @@ index 2375aed..d8371ac 100644
  /// build keeps settings in localStorage rather than a file. Returns false if the host doesn't
  /// provide `window.warpPanelOpenSettingsFile`.
 diff --git a/app/src/terminal/view.rs b/app/src/terminal/view.rs
-index 78182bf..6c24073 100644
+index e99f7cb..feeb6f2 100644
 --- a/app/src/terminal/view.rs
 +++ b/app/src/terminal/view.rs
-@@ -2693,6 +2693,9 @@ pub struct TerminalView {
+@@ -2700,6 +2700,9 @@ pub struct TerminalView {
  
      #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
      file_link_scanning_join_handle: Option<JoinHandle<()>>,
@@ -139,7 +139,7 @@ index 78182bf..6c24073 100644
  
      last_focus_ts: Option<NaiveDateTime>,
      tips_completed: ModelHandle<TipsCompleted>,
-@@ -4432,6 +4435,7 @@ impl TerminalView {
+@@ -4441,6 +4444,7 @@ impl TerminalView {
              inline_banners_state: Default::default(),
              bookmarked_blocks: Default::default(),
              file_link_scanning_join_handle: None,
@@ -147,7 +147,7 @@ index 78182bf..6c24073 100644
              last_focus_ts: None,
              tips_completed: resources.tips_completed.clone(),
              privacy_settings_snapshot: privacy_settings_handle.as_ref(ctx).get_snapshot(ctx),
-@@ -17366,6 +17370,29 @@ impl TerminalView {
+@@ -17683,6 +17687,29 @@ impl TerminalView {
                          })
                          .unwrap_or_default()
                      }
@@ -177,7 +177,7 @@ index 78182bf..6c24073 100644
                      GridHighlightedLink::Hyperlink { uri, .. } => {
                          // OSC 8 hyperlink right-click. "Copy link" copies the
                          // URI verbatim; "Open link" dispatches through
-@@ -19198,12 +19225,10 @@ impl TerminalView {
+@@ -19515,12 +19542,10 @@ impl TerminalView {
          };
  
          match link {
@@ -193,7 +193,7 @@ index 78182bf..6c24073 100644
              }
              GridHighlightedLink::Url(url) if url.contains(position) => {
                  let uri = self
-@@ -27859,7 +27884,12 @@ impl TypedActionView for TerminalView {
+@@ -28253,7 +28278,12 @@ impl TypedActionView for TerminalView {
              ShowInFileExplorer(path) => {
                  send_telemetry_from_ctx!(TelemetryEvent::ShowInFileExplorer, ctx);
  

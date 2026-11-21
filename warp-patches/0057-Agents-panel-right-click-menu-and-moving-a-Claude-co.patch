@@ -1,7 +1,7 @@
-From 9e08cd0db33245653af1f9e3caaff21dc4f3597d Mon Sep 17 00:00:00 2001
+From 3c1c0cb145ab80bff307f7e911697666b9c8a88d Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Sun, 11 Oct 2026 18:04:27 -0700
-Subject: [PATCH 57/74] Agents panel right-click menu and moving a Claude
+Subject: [PATCH 57/73] Agents panel right-click menu and moving a Claude
  conversation to the host
 
 Right-clicking an Agents row offers: go to its Warp tab, open in the Claude Code
@@ -126,7 +126,7 @@ index f415953..fade230 100644
              | ShiftSelectTabRange { .. }
              | ToggleTabMultiSelection { .. }
 diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
-index a96eb2c..e56118a 100644
+index a862b0f..2b177c7 100644
 --- a/app/src/workspace/view.rs
 +++ b/app/src/workspace/view.rs
 @@ -41,6 +41,10 @@ use std::path::{Path, PathBuf};
@@ -140,7 +140,7 @@ index a96eb2c..e56118a 100644
  #[cfg(target_os = "macos")]
  use std::time::{SystemTime, UNIX_EPOCH};
  
-@@ -6051,6 +6055,60 @@ impl Workspace {
+@@ -6053,6 +6057,60 @@ impl Workspace {
  
      /// Searches this workspace's tabs for the given terminal view and focuses it.
      /// Returns true if the terminal view was found and focused.
@@ -201,7 +201,7 @@ index a96eb2c..e56118a 100644
      fn focus_terminal_view_locally(
          &mut self,
          terminal_view_id: EntityId,
-@@ -6794,6 +6852,9 @@ impl Workspace {
+@@ -6796,6 +6854,9 @@ impl Workspace {
                      ctx,
                  );
              }
@@ -211,7 +211,7 @@ index a96eb2c..e56118a 100644
              LeftPanelEvent::FocusTerminalView(terminal_view_id) => {
                  self.handle_action(
                      &WorkspaceAction::FocusTerminalViewInWorkspace {
-@@ -25763,6 +25824,9 @@ impl TypedActionView for Workspace {
+@@ -25835,6 +25896,9 @@ impl TypedActionView for Workspace {
                      self.focus_terminal_view_in_other_window(*terminal_view_id, ctx);
                  }
              }

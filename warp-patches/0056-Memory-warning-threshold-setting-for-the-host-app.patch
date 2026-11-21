@@ -1,7 +1,7 @@
-From 17bd396dd77c1e55a033a610b4f2aac2d6e212fd Mon Sep 17 00:00:00 2001
+From 5fde1393b79bab66d0b670a0b521cde000e78372 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Sun, 11 Oct 2026 17:55:24 -0700
-Subject: [PATCH 56/74] Memory warning threshold setting for the host app
+Subject: [PATCH 56/73] Memory warning threshold setting for the host app
 
 host.memory_warning_gb (default 3.5, 0 = off): the VS Code extension warns when one of
 the window's processes passes it.

@@ -1,7 +1,7 @@
-From 6d3133df46b7f79e29dad8abaeb7b2fc07ff83ea Mon Sep 17 00:00:00 2001
+From 50ed01726e605c13d75a0d3e1f7d9878aa0bb8e0 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Sun, 11 Oct 2026 21:41:22 -0700
-Subject: [PATCH 58/74] Clear stale "in progress" on idle CLI agents
+Subject: [PATCH 58/73] Clear stale "in progress" on idle CLI agents
 
 A CLI agent session is registered as InProgress when its command is
 detected and only left that state on Stop/StopFailure or Ctrl-C. A freshly
@@ -17,16 +17,16 @@ use, which the host path resolution change removed.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- app/src/terminal/cli_agent_sessions/mod.rs    | 40 +++++++++---
+ app/src/terminal/cli_agent_sessions/mod.rs    | 37 ++++++++---
  .../terminal/cli_agent_sessions/mod_tests.rs  | 60 +++++++++++++++++
  app/src/terminal/view/link_detection.rs       | 64 +++++++++++++++----
- 3 files changed, 141 insertions(+), 23 deletions(-)
+ 3 files changed, 139 insertions(+), 22 deletions(-)
 
 diff --git a/app/src/terminal/cli_agent_sessions/mod.rs b/app/src/terminal/cli_agent_sessions/mod.rs
-index 7b44cf7..f4c69c8 100644
+index df6e328..3b2feb4 100644
 --- a/app/src/terminal/cli_agent_sessions/mod.rs
 +++ b/app/src/terminal/cli_agent_sessions/mod.rs
-@@ -258,10 +258,26 @@ impl CLIAgentSession {
+@@ -298,10 +298,26 @@ impl CLIAgentSession {
                  CLIAgentSessionStatus::InProgress
              }
              // IdlePrompt means the agent is sitting at its prompt waiting for input.
@@ -55,20 +55,24 @@ index 7b44cf7..f4c69c8 100644
                  return None;
              }
              CLIAgentEventType::Unknown(_) => return None,
-@@ -517,7 +533,11 @@ impl CLIAgentSessionsModel {
+@@ -557,6 +573,7 @@ impl CLIAgentSessionsModel {
          }
  
          let event_type = &event.event;
--        if let Some(new_status) = session.apply_event(event) {
 +        let status_before = session.status.clone();
-+        let new_status = session.apply_event(event);
+         // Interactive clients keep ignoring this event: only an unattended run has no one to
+         // answer the prompt.
+         let new_status = if matches!(event.event, CLIAgentEventType::NeedsInput)
+@@ -566,6 +583,8 @@ impl CLIAgentSessionsModel {
+         } else {
+             session.apply_event(event)
+         };
 +        // A status set without `StatusChanged` (see `apply_event`) still has to re-render.
 +        let changed_quietly = new_status.is_none() && session.status != status_before;
-+        if let Some(new_status) = new_status {
+         if let Some(new_status) = new_status {
              let agent = session.agent;
              ctx.emit(CLIAgentSessionsModelEvent::StatusChanged {
-                 terminal_view_id,
-@@ -528,12 +548,14 @@ impl CLIAgentSessionsModel {
+@@ -577,12 +596,14 @@ impl CLIAgentSessionsModel {
              });
          }
  
@@ -90,10 +94,10 @@ index 7b44cf7..f4c69c8 100644
                  terminal_view_id,
                  agent: session.agent,
 diff --git a/app/src/terminal/cli_agent_sessions/mod_tests.rs b/app/src/terminal/cli_agent_sessions/mod_tests.rs
-index 76ba27c..95a1721 100644
+index e3c00cb..06e5af5 100644
 --- a/app/src/terminal/cli_agent_sessions/mod_tests.rs
 +++ b/app/src/terminal/cli_agent_sessions/mod_tests.rs
-@@ -1274,3 +1274,63 @@ fn second_ctrl_c_while_armed_reuses_the_existing_window() {
+@@ -1456,3 +1456,63 @@ fn second_ctrl_c_while_armed_reuses_the_existing_window() {
          });
      });
  }

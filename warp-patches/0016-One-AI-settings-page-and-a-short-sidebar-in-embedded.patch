@@ -1,7 +1,7 @@
-From 10d2c036d6c322dee961057863b52303d8d995d1 Mon Sep 17 00:00:00 2001
+From 5e4d2ad5afc07a89d0b3503fa3123a06d98341c7 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 16:16:55 -0700
-Subject: [PATCH 16/74] One AI settings page and a short sidebar in embedded
+Subject: [PATCH 16/73] One AI settings page and a short sidebar in embedded
  builds
 
 The AI page holds the OpenRouter provider, # command search, suggestions
@@ -526,7 +526,7 @@ index 9f73ff3..82a3dba 100644
      }
  }
 diff --git a/app/src/settings_view/mod.rs b/app/src/settings_view/mod.rs
-index 2dcdfc1..bb414dd 100644
+index 97433f4..e5742d1 100644
 --- a/app/src/settings_view/mod.rs
 +++ b/app/src/settings_view/mod.rs
 @@ -350,6 +350,8 @@ impl Display for SettingsSection {
@@ -538,7 +538,7 @@ index 2dcdfc1..bb414dd 100644
              SettingsSection::WarpAgent => write!(f, "Warp Agent"),
              SettingsSection::AgentProfiles => write!(f, "Profiles"),
              SettingsSection::AgentMCPServers => write!(f, "MCP servers"),
-@@ -1052,6 +1054,13 @@ enum NavStop {
+@@ -1053,6 +1055,13 @@ enum NavStop {
      },
  }
  
@@ -552,7 +552,7 @@ index 2dcdfc1..bb414dd 100644
  /// Builds the ordered list of arrow-key nav stops from `nav_items`.
  ///
  /// `is_visible` decides which sections are currently shown in the sidebar;
-@@ -1460,12 +1469,42 @@ impl SettingsView {
+@@ -1461,12 +1470,42 @@ impl SettingsView {
              );
          }
  
@@ -595,7 +595,7 @@ index 2dcdfc1..bb414dd 100644
  
          // Auto-expand the umbrella if the initial page is one of its subpages.
          for item in &mut nav_items {
-@@ -2046,6 +2085,13 @@ impl SettingsView {
+@@ -2047,6 +2086,13 @@ impl SettingsView {
          allow_steal_focus: bool,
          ctx: &mut ViewContext<Self>,
      ) {
@@ -609,7 +609,7 @@ index 2dcdfc1..bb414dd 100644
          // Every nav target owns its backing page. Check it exists.
          if self.settings_page(section).is_none() {
              return;
-@@ -2114,7 +2160,16 @@ impl SettingsView {
+@@ -2115,7 +2161,16 @@ impl SettingsView {
          });
      }
  
@@ -627,7 +627,7 @@ index 2dcdfc1..bb414dd 100644
              SettingsPageViewHandle::Main(v) => v.as_ref(app).should_render(app),
              SettingsPageViewHandle::Teams(v) => v.as_ref(app).should_render(app),
 diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
-index 8f92d4b..50befb3 100644
+index 1c0d53c..328b77e 100644
 --- a/app/src/settings_view/warp_agent_page.rs
 +++ b/app/src/settings_view/warp_agent_page.rs
 @@ -50,10 +50,13 @@ use warpui::{

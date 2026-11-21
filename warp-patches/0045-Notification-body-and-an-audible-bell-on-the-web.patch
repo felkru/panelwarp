@@ -1,7 +1,7 @@
-From b5c5245985bdea88136acdea62e14aeeb039a9f2 Mon Sep 17 00:00:00 2001
+From a0af2a96ece306dbcc3da6658ebffd6311c5cff5 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 15:43:15 -0700
-Subject: [PATCH 45/74] Notification body and an audible bell on the web
+Subject: [PATCH 45/73] Notification body and an audible bell on the web
 
 Web notifications now carry their body and respect play_sound, and the audible bell
 asks the host page to play it (window.warpPanelBell), so the setting is offered on
@@ -21,10 +21,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 app/src/terminal/audible_bell/web.rs
 
 diff --git a/Cargo.toml b/Cargo.toml
-index 3c08264..fbd2b10 100644
+index 570735a..752b571 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -368,6 +368,7 @@ web-sys = { version = "0.3.69", features = [
+@@ -373,6 +373,7 @@ web-sys = { version = "0.3.69", features = [
    "MediaQueryList",
    "Window",
    "Notification",

@@ -1,7 +1,7 @@
-From ce66a341624999b0b57296ee4b9afaf5e97dc39d Mon Sep 17 00:00:00 2001
+From 7711c259e94ec2f342021c8da6ca51810caadae4 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 15:05:22 -0700
-Subject: [PATCH 14/74] Panel settings in Warp's settings; keep the remote_tty
+Subject: [PATCH 14/73] Panel settings in Warp's settings; keep the remote_tty
  init line out of shell history
 
 Embedded (remote_tty) builds get a HostAiSettings group (host.ai.* and
@@ -143,10 +143,10 @@ index 0000000..1cd9229
 +    }
 +]);
 diff --git a/app/src/settings/init.rs b/app/src/settings/init.rs
-index 11b58e7..de5de97 100644
+index a60fd48..3e5d61f 100644
 --- a/app/src/settings/init.rs
 +++ b/app/src/settings/init.rs
-@@ -11,6 +11,7 @@ use warpui_extras::user_preferences;
+@@ -12,6 +12,7 @@ use warpui_extras::user_preferences;
  use super::app_icon::AppIconSettings;
  use super::app_installation_detection::UserAppInstallDetectionSettings;
  use super::cloud_preferences::CloudPreferencesSettings;
@@ -154,7 +154,7 @@ index 11b58e7..de5de97 100644
  use super::initializer::SettingsInitializer;
  use super::native_preference::NativePreferenceSettings;
  use super::{
-@@ -92,6 +93,7 @@ pub fn register_all_settings(ctx: &mut AppContext) {
+@@ -96,6 +97,7 @@ pub fn register_all_settings(ctx: &mut AppContext) {
      AppIconSettings::register(ctx);
      AppEditorSettings::register(ctx);
      InputSettings::register(ctx);
@@ -163,7 +163,7 @@ index 11b58e7..de5de97 100644
      AltScreenReporting::register(ctx);
      UndoCloseSettings::register(ctx);
 diff --git a/app/src/settings/mod.rs b/app/src/settings/mod.rs
-index 9ab31b8..fb56919 100644
+index 88b5cf3..7247503 100644
 --- a/app/src/settings/mod.rs
 +++ b/app/src/settings/mod.rs
 @@ -12,6 +12,7 @@ mod debug;
@@ -172,18 +172,18 @@ index 9ab31b8..fb56919 100644
  pub mod font;
 +mod host_ai;
  mod gpu;
+ mod iap;
  pub mod import;
- mod init;
-@@ -56,6 +57,7 @@ pub use debug::*;
+@@ -57,6 +58,7 @@ pub use debug::*;
  pub use editor::*;
  pub use emacs_bindings::*;
  pub use font::*;
 +pub use host_ai::*;
  pub use gpu::*;
+ pub use iap::*;
  pub use init::*;
- pub use input::*;
 diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
-index 204d911..106c7b9 100644
+index 20d98a2..b14a760 100644
 --- a/app/src/settings_view/warp_agent_page.rs
 +++ b/app/src/settings_view/warp_agent_page.rs
 @@ -93,6 +93,8 @@ use crate::server::telemetry::{
@@ -289,7 +289,7 @@ index 204d911..106c7b9 100644
              WarpAgentPageAction::ToggleAiCommandSearchHashTrigger => {
                  InputSettings::handle(ctx).update(ctx, |input_settings, ctx| {
                      report_if_error!(
-@@ -7019,6 +7085,297 @@ impl SettingsWidget for HostApiKeyWidget {
+@@ -7020,6 +7086,297 @@ impl SettingsWidget for HostApiKeyWidget {
      }
  }
  
@@ -588,10 +588,10 @@ index 204d911..106c7b9 100644
  #[derive(Default)]
  struct AddCustomRouterWidget;
 diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
-index 9a3f1be..69805f5 100644
+index 09a0a11..b76648f 100644
 --- a/app/src/terminal/remote_tty/event_loop.rs
 +++ b/app/src/terminal/remote_tty/event_loop.rs
-@@ -215,7 +215,9 @@ impl EventLoop {
+@@ -217,7 +217,9 @@ impl EventLoop {
          sink: &mut impl Sink,
          is_honor_ps1_enabled: bool,
      ) -> anyhow::Result<()> {

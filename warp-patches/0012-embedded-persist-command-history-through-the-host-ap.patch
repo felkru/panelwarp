@@ -1,7 +1,7 @@
-From 61acc084b84b89546dcc30d5e3c9f1cb610bae33 Mon Sep 17 00:00:00 2001
+From 0f974a68501fa5b596f060730818c80019ab0bed Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 14:10:43 -0700
-Subject: [PATCH 12/74] embedded: persist command history through the host app
+Subject: [PATCH 12/73] embedded: persist command history through the host app
 
 The web build has no local database, so command metadata (exit code, times, cwd, git branch,
 shell/host) went nowhere and was lost on reload. Embedded builds now report started/finished
@@ -19,10 +19,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  4 files changed, 175 insertions(+), 40 deletions(-)
 
 diff --git a/app/src/lib.rs b/app/src/lib.rs
-index daae0d9..1f0c9d5 100644
+index 3849db1..4ce7606 100644
 --- a/app/src/lib.rs
 +++ b/app/src/lib.rs
-@@ -2077,6 +2077,13 @@ pub(crate) fn initialize_app(
+@@ -2192,6 +2192,13 @@ pub(crate) fn initialize_app(
          ProjectManagementModel::new(persisted_projects, persistence_writer.sender(), ctx)
      });
  
@@ -171,10 +171,10 @@ index cf613c7..6587057 100644
 +    }
 +}
 diff --git a/app/src/terminal/view.rs b/app/src/terminal/view.rs
-index 7d21834..107c11c 100644
+index e4889de..bcfce7f 100644
 --- a/app/src/terminal/view.rs
 +++ b/app/src/terminal/view.rs
-@@ -13053,7 +13053,7 @@ impl TerminalView {
+@@ -13370,7 +13370,7 @@ impl TerminalView {
                          exit_code,
                          Some(start_ts),
                          Some(completed_ts),
@@ -183,7 +183,7 @@ index 7d21834..107c11c 100644
                      ) = (
                          self.active_block_session_id(),
                          serialized_block.exit_code,
-@@ -13070,29 +13070,35 @@ impl TerminalView {
+@@ -13387,29 +13387,35 @@ impl TerminalView {
                              );
                          });
  

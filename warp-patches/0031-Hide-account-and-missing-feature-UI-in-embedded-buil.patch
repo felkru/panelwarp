@@ -1,7 +1,7 @@
-From 7a26a4e67f9dee399c963b94d1cd9d6890218f67 Mon Sep 17 00:00:00 2001
+From 4cf819f93d90ff85826888d559dac7159e1dd201 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 01:50:38 -0700
-Subject: [PATCH 31/74] Hide account and missing-feature UI in embedded builds
+Subject: [PATCH 31/73] Hide account and missing-feature UI in embedded builds
 
 The user menu ends after "Join our Slack community" (no Sign up, Upgrade, Invite a friend, Log
 out, What's new). "Keyboard shortcuts" and Cmd+/ open the settings page instead of the resource
@@ -159,10 +159,10 @@ index 3ec0414..15ef3d0 100644
      bindings_iter: impl Iterator<Item = &'a CommandBinding>,
      search_term: &str,
 diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
-index 5470663..67c138e 100644
+index 6e570c6..8f33e26 100644
 --- a/app/src/workspace/view.rs
 +++ b/app/src/workspace/view.rs
-@@ -10065,10 +10065,15 @@ impl Workspace {
+@@ -10067,10 +10067,15 @@ impl Workspace {
              }
          }
  
@@ -181,7 +181,7 @@ index 5470663..67c138e 100644
              MenuItemFields::new("Settings")
                  .with_on_select_action(WorkspaceAction::ShowSettings)
                  .into_item(),
-@@ -10091,12 +10096,17 @@ impl Workspace {
+@@ -10093,12 +10098,17 @@ impl Workspace {
                  .into_item(),
          );
  
@@ -202,7 +202,7 @@ index 5470663..67c138e 100644
  
          if self.auth_state.is_anonymous_or_logged_out() {
              items.push(
-@@ -10181,6 +10191,11 @@ impl Workspace {
+@@ -10183,6 +10193,11 @@ impl Workspace {
      }
  
      pub fn toggle_keybindings_page(&mut self, ctx: &mut ViewContext<Self>) {

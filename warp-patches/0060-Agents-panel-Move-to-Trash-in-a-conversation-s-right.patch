@@ -1,7 +1,7 @@
-From 62fb80a4efc86114324abc458fda5aeaba99834e Mon Sep 17 00:00:00 2001
+From 9d22ef8a56311662887ae15ff7a51043c9367bb0 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Mon, 12 Oct 2026 21:22:20 -0700
-Subject: [PATCH 60/74] Agents panel: Move to Trash in a conversation's
+Subject: [PATCH 60/73] Agents panel: Move to Trash in a conversation's
  right-click menu
 
 The host moves the conversation's session file (and Claude Code's folder of

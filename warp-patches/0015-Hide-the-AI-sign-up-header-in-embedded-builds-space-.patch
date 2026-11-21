@@ -1,7 +1,7 @@
-From 488d0800ce3c4b34fca1e86aab0dd120c32b2d26 Mon Sep 17 00:00:00 2001
+From 1b5afcd025bf8205e6e94317532093495404eaeb Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 15:19:17 -0700
-Subject: [PATCH 15/74] Hide the AI sign-up header in embedded builds; space
+Subject: [PATCH 15/73] Hide the AI sign-up header in embedded builds; space
  the AI provider rows
 
 Embedded (remote_tty) builds have no Warp accounts, so the Warp Agent page no
@@ -14,7 +14,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 31 insertions(+), 16 deletions(-)
 
 diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
-index 106c7b9..8f92d4b 100644
+index b14a760..1c0d53c 100644
 --- a/app/src/settings_view/warp_agent_page.rs
 +++ b/app/src/settings_view/warp_agent_page.rs
 @@ -3334,8 +3334,10 @@ fn render_global_ai_toggle(
@@ -30,7 +30,7 @@ index 106c7b9..8f92d4b 100644
          row.add_child(
              Flex::row()
                  .with_cross_axis_alignment(CrossAxisAlignment::Center)
-@@ -7076,15 +7078,26 @@ impl SettingsWidget for HostApiKeyWidget {
+@@ -7077,15 +7079,26 @@ impl SettingsWidget for HostApiKeyWidget {
              .with_style(editor_style)
              .build()
              .finish();
@@ -63,7 +63,7 @@ index 106c7b9..8f92d4b 100644
  fn host_settings_editor(
      text: &str,
      placeholder: &str,
-@@ -7120,7 +7133,7 @@ fn render_host_setting_column(
+@@ -7121,7 +7134,7 @@ fn render_host_setting_column(
      appearance: &Appearance,
      app: &AppContext,
  ) -> Box<dyn Element> {
@@ -72,7 +72,7 @@ index 106c7b9..8f92d4b 100644
          .with_spacing(8.)
          .with_child(
              Text::new_inline(label.to_owned(), appearance.ui_font_family(), CONTENT_FONT_SIZE)
-@@ -7133,7 +7146,8 @@ fn render_host_setting_column(
+@@ -7134,7 +7147,8 @@ fn render_host_setting_column(
                  .finish(),
          )
          .with_child(control)
@@ -82,7 +82,7 @@ index 106c7b9..8f92d4b 100644
  }
  
  #[derive(Clone, Copy)]
-@@ -7254,7 +7268,7 @@ impl SettingsWidget for HostAiEffortWidget {
+@@ -7255,7 +7269,7 @@ impl SettingsWidget for HostAiEffortWidget {
      }
  
      fn render(&self, view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
@@ -91,7 +91,7 @@ index 106c7b9..8f92d4b 100644
              appearance,
              "Expanded model effort",
              Some("Reasoning effort for the expanded model. Higher can mean slower suggestions."),
-@@ -7267,7 +7281,7 @@ impl SettingsWidget for HostAiEffortWidget {
+@@ -7268,7 +7282,7 @@ impl SettingsWidget for HostAiEffortWidget {
              ),
              None,
              &self.dropdown,
@@ -100,7 +100,7 @@ index 106c7b9..8f92d4b 100644
      }
  }
  
-@@ -7294,7 +7308,7 @@ impl SettingsWidget for HostAiPrivateRoutingWidget {
+@@ -7295,7 +7309,7 @@ impl SettingsWidget for HostAiPrivateRoutingWidget {
              &view.local_only_icon_tooltip_states,
              app,
          );
@@ -109,7 +109,7 @@ index 106c7b9..8f92d4b 100644
              .with_spacing(4.)
              .with_child(toggle)
              .with_child(
-@@ -7307,7 +7321,8 @@ impl SettingsWidget for HostAiPrivateRoutingWidget {
+@@ -7308,7 +7322,8 @@ impl SettingsWidget for HostAiPrivateRoutingWidget {
                  .with_color(styles::description_font_color(true, app).into())
                  .finish(),
              )
@@ -119,7 +119,7 @@ index 106c7b9..8f92d4b 100644
      }
  }
  
-@@ -7354,7 +7369,7 @@ impl SettingsWidget for HostAiRecentCommandsWidget {
+@@ -7355,7 +7370,7 @@ impl SettingsWidget for HostAiRecentCommandsWidget {
  
      fn render(&self, view: &Self::View, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
          let private_routing = *HostAiSettings::as_ref(app).private_routing;
@@ -128,7 +128,7 @@ index 106c7b9..8f92d4b 100644
              appearance,
              "Recent commands in # requests",
              Some(if private_routing {
-@@ -7372,7 +7387,7 @@ impl SettingsWidget for HostAiRecentCommandsWidget {
+@@ -7373,7 +7388,7 @@ impl SettingsWidget for HostAiRecentCommandsWidget {
              ),
              (!private_routing).then(|| appearance.theme().disabled_ui_text_color()),
              &self.dropdown,

@@ -1,7 +1,7 @@
-From 0ffa33bd159d61e7777129396aacae51acdd7978 Mon Sep 17 00:00:00 2001
+From f320da0c0f85c02dd4a7b606708f2e8b5cf29dff Mon Sep 17 00:00:00 2001
 From: Alex Brodsky <122503996+Albro3459@users.noreply.github.com>
 Date: Mon, 16 Nov 2026 17:58:15 -0800
-Subject: [PATCH 68/74] Keyboard shortcuts page opens the keybindings file
+Subject: [PATCH 67/73] Keyboard shortcuts page opens the keybindings file
  through the host
 
 The web build keeps keybindings in localStorage, and nothing in Warp opened keybindings.yaml. The keyboard shortcuts page now shows an "Open keybindings file" button on its own row under the page description when the host page defines window.warpPanelOpenKeybindingsFile, and calls it on click. Desktop and pages without the hook show nothing new. wasm.rs gets host_has_function for UI that needs a host hook

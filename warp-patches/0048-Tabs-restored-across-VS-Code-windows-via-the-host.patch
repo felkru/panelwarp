@@ -1,7 +1,7 @@
-From fe8ed4f04bcd6f0cac4c921bb967c2830e1bd565 Mon Sep 17 00:00:00 2001
+From a3e3a11ddbb345f4878b38c29f7cd42decffae65 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Fri, 9 Oct 2026 00:22:02 -0700
-Subject: [PATCH 48/74] Tabs restored across VS Code windows via the host
+Subject: [PATCH 48/73] Tabs restored across VS Code windows via the host
 
 On the web, Warp's session restoration has no SQLite, so the layout (tabs,
 splits, titles, each pane's directory) and finished blocks go to the host
@@ -24,10 +24,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  10 files changed, 421 insertions(+), 7 deletions(-)
 
 diff --git a/app/src/lib.rs b/app/src/lib.rs
-index 1f0c9d5..c8bcf54 100644
+index 4ce7606..7c1c743 100644
 --- a/app/src/lib.rs
 +++ b/app/src/lib.rs
-@@ -1722,6 +1722,10 @@ pub(crate) fn initialize_app(
+@@ -1837,6 +1837,10 @@ pub(crate) fn initialize_app(
              )
          });
  
@@ -38,7 +38,7 @@ index 1f0c9d5..c8bcf54 100644
      // The daemon's `PersistedDataScope::CodebaseIndicesOnly` read already
      // skips everything except codebase index metadata.
      if matches!(launch_mode, LaunchMode::RemoteServerDaemon { .. }) {
-@@ -2085,6 +2089,8 @@ pub(crate) fn initialize_app(
+@@ -2200,6 +2204,8 @@ pub(crate) fn initialize_app(
          command_history
      };
      ctx.add_singleton_model(move |_| History::new(command_history));
@@ -48,10 +48,10 @@ index 1f0c9d5..c8bcf54 100644
      ctx.add_singleton_model(CustomSecretRegexUpdater::new);
  
 diff --git a/app/src/pane_group/mod.rs b/app/src/pane_group/mod.rs
-index 2d734dd..7ab56e0 100644
+index 8cf3b6f..ccb3c9a 100644
 --- a/app/src/pane_group/mod.rs
 +++ b/app/src/pane_group/mod.rs
-@@ -1646,10 +1646,12 @@ impl PaneGroup {
+@@ -1650,10 +1650,12 @@ impl PaneGroup {
                          }
                      });
  
@@ -65,7 +65,7 @@ index 2d734dd..7ab56e0 100644
  
                  // Filter conversation IDs to only include those that have task messages
                  // and are not entirely passive (ignored suggestions).
-@@ -6114,6 +6116,8 @@ impl PaneGroup {
+@@ -6131,6 +6133,8 @@ impl PaneGroup {
          cfg_if::cfg_if! {
              if #[cfg(feature = "remote_tty")] {
                  let terminal_init = RemoteTtyTerminalManager::create_model(
@@ -75,10 +75,10 @@ index 2d734dd..7ab56e0 100644
                      initial_size,
                      model_event_sender,
 diff --git a/app/src/pane_group/pane/terminal_pane.rs b/app/src/pane_group/pane/terminal_pane.rs
-index b42bd77..a9737f7 100644
+index 75b94f8..79aca46 100644
 --- a/app/src/pane_group/pane/terminal_pane.rs
 +++ b/app/src/pane_group/pane/terminal_pane.rs
-@@ -1009,6 +1009,17 @@ fn handle_terminal_view_event(
+@@ -1067,6 +1067,17 @@ fn handle_terminal_view_event(
                                  },
                              );
                          }
@@ -484,7 +484,7 @@ index 6ff27fd..1e29908 100644
          surface: settings::SettingSurfaces::GUI,
          private: false,
 diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
-index 9ea7a34..e245df2 100644
+index b5f5d98..b478fa0 100644
 --- a/app/src/terminal/remote_tty/event_loop.rs
 +++ b/app/src/terminal/remote_tty/event_loop.rs
 @@ -1,4 +1,5 @@
@@ -595,10 +595,10 @@ index 3b05701..a44fca6 100644
                  message_receiver,
                  replies_tx,
 diff --git a/app/src/terminal/view.rs b/app/src/terminal/view.rs
-index 513ea7d..b2e179d 100644
+index 097dea3..a6cd438 100644
 --- a/app/src/terminal/view.rs
 +++ b/app/src/terminal/view.rs
-@@ -24389,6 +24389,20 @@ impl TerminalView {
+@@ -24709,6 +24709,20 @@ impl TerminalView {
      }
  
      pub fn pwd_if_local(&self, ctx: &AppContext) -> Option<String> {
@@ -620,7 +620,7 @@ index 513ea7d..b2e179d 100644
              .map(|path| path.to_string_lossy().into_owned())
      }
 diff --git a/app/src/terminal/view/docker_sandbox/mod.rs b/app/src/terminal/view/docker_sandbox/mod.rs
-index 753b5a0..8b04654 100644
+index ee57acd..f94bd69 100644
 --- a/app/src/terminal/view/docker_sandbox/mod.rs
 +++ b/app/src/terminal/view/docker_sandbox/mod.rs
 @@ -89,6 +89,8 @@ fn create_docker_sandbox_view(

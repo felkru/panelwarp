@@ -1,7 +1,7 @@
-From ac01703a0285136fa69c6b385024274848dbe201 Mon Sep 17 00:00:00 2001
+From 02baf7c6c4eba720d8bcc5449f7743b3692117df Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 18 Nov 2026 11:22:14 +0100
-Subject: [PATCH 71/74] Settings ask for a wider panel below 700 px in embedded
+Subject: [PATCH 70/73] Settings ask for a wider panel below 700 px in embedded
  builds
 
 Below the sidebar plus the page's designed 520 px minimum, settings rows overlap: labels run into their dropdowns and hints. Embedded builds now show "Make the Warp panel wider to use settings" there instead, with how to widen it and the Open Settings File command as the alternative.
@@ -12,7 +12,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 62 insertions(+), 2 deletions(-)
 
 diff --git a/app/src/settings_view/mod.rs b/app/src/settings_view/mod.rs
-index 9030efa..2fbbe17 100644
+index fe466c5..6dd2b47 100644
 --- a/app/src/settings_view/mod.rs
 +++ b/app/src/settings_view/mod.rs
 @@ -40,8 +40,8 @@ use warpui::elements::{
@@ -38,7 +38,7 @@ index 9030efa..2fbbe17 100644
  /// Returns the sidebar width, widened only when the settings-file footer
  /// is enabled. This keeps the wider layout gated with the footer itself so
  /// Preview/Stable users don't see an unexplained 48px width bump before
-@@ -2474,6 +2479,49 @@ impl SettingsView {
+@@ -2475,6 +2480,49 @@ impl SettingsView {
          .finish()
      }
  
@@ -88,7 +88,7 @@ index 9030efa..2fbbe17 100644
      fn render_search_zero_state(&self, appearance: &Appearance) -> Box<dyn Element> {
          let theme = appearance.theme();
          Container::new(
-@@ -2703,6 +2751,18 @@ impl View for SettingsView {
+@@ -2704,6 +2752,18 @@ impl View for SettingsView {
              .with_child(Shrinkable::new(1., sidebar).finish())
              .with_child(Shrinkable::new(1., page).finish())
              .finish();

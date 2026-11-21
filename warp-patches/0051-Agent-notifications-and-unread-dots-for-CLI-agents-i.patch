@@ -1,7 +1,7 @@
-From 36122f4c2264e868f3df36a1cac0bc41caf2fee4 Mon Sep 17 00:00:00 2001
+From 273ee9ed49372771431e727b7a4bdbefdff7a866 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Sun, 11 Oct 2026 09:58:27 -0700
-Subject: [PATCH 51/74] Agent notifications and unread dots for CLI agents in
+Subject: [PATCH 51/73] Agent notifications and unread dots for CLI agents in
  embedded builds
 
 The remote PTY's init line now sets what desktop's PTY environment does for CLI agent
@@ -24,7 +24,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  app/src/settings_view/warp_agent_page.rs      | 182 ++++++++++++++----
  app/src/terminal/cli_agent_sessions/mod.rs    |   5 +
  app/src/terminal/input.rs                     |   4 +-
- app/src/terminal/remote_tty/event_loop.rs     |  61 +++++-
+ app/src/terminal/remote_tty/event_loop.rs     |  65 +++++--
  .../terminal/remote_tty/event_loop_tests.rs   |   5 +-
  .../terminal/remote_tty/terminal_manager.rs   |  25 ++-
  app/src/terminal/view/link_detection.rs       |  33 ++--
@@ -34,7 +34,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  app/src/workspace/view/agent_conversations.rs |  93 ++++++++-
  app/src/workspace/view/left_panel.rs          |   5 +
  app/src/workspaces/user_workspaces/mod.rs     |   6 +-
- 21 files changed, 461 insertions(+), 200 deletions(-)
+ 21 files changed, 463 insertions(+), 202 deletions(-)
 
 diff --git a/app/src/platform/wasm.rs b/app/src/platform/wasm.rs
 index 1fdd574..503c8a8 100644
@@ -135,10 +135,10 @@ index 78b29e4..ac3602a 100644
  
      fn on_focus(&mut self, focus_ctx: &FocusContext, ctx: &mut ViewContext<Self>) {
 diff --git a/app/src/server/server_api/ai.rs b/app/src/server/server_api/ai.rs
-index e1eee30..c511459 100644
+index b2e5274..425c7c1 100644
 --- a/app/src/server/server_api/ai.rs
 +++ b/app/src/server/server_api/ai.rs
-@@ -1940,8 +1940,12 @@ impl AIClient for ServerApi {
+@@ -2372,8 +2372,12 @@ impl AIClient for ServerApi {
      ) -> Result<Vec<AIGeneratedCommand>, GenerateCommandsFromNaturalLanguageError> {
          // Embedded builds answer with the host app's own AI provider (bring-your-own-key).
          #[cfg(all(target_family = "wasm", feature = "remote_tty"))]
@@ -154,7 +154,7 @@ index e1eee30..c511459 100644
          #[allow(unreachable_code)]
          let default_err = GenerateCommandsFromNaturalLanguageError::Other;
 diff --git a/app/src/settings/mod.rs b/app/src/settings/mod.rs
-index fb56919..d47ee05 100644
+index 7247503..ed360ba 100644
 --- a/app/src/settings/mod.rs
 +++ b/app/src/settings/mod.rs
 @@ -12,8 +12,8 @@ mod debug;
@@ -164,19 +164,19 @@ index fb56919..d47ee05 100644
 -mod host_ai;
  mod gpu;
 +mod host_ai;
+ mod iap;
  pub mod import;
  mod init;
- pub mod initializer;
-@@ -57,8 +57,8 @@ pub use debug::*;
+@@ -58,8 +58,8 @@ pub use debug::*;
  pub use editor::*;
  pub use emacs_bindings::*;
  pub use font::*;
 -pub use host_ai::*;
  pub use gpu::*;
 +pub use host_ai::*;
+ pub use iap::*;
  pub use init::*;
  pub use input::*;
- pub use input_mode::*;
 diff --git a/app/src/settings/privacy.rs b/app/src/settings/privacy.rs
 index e8a3fa6..59f9377 100644
 --- a/app/src/settings/privacy.rs
@@ -358,10 +358,10 @@ index 82a3dba..e880746 100644
      }
  }
 diff --git a/app/src/settings_view/mod.rs b/app/src/settings_view/mod.rs
-index 3b8e765..9030efa 100644
+index 1252617..fe466c5 100644
 --- a/app/src/settings_view/mod.rs
 +++ b/app/src/settings_view/mod.rs
-@@ -1505,13 +1505,12 @@ impl SettingsView {
+@@ -1506,13 +1506,12 @@ impl SettingsView {
              }
              other => other.unwrap_or_default(),
          };
@@ -399,7 +399,7 @@ index 69e492a..50cca79 100644
  const INFO_TOOLTIP_MAX_WIDTH: f32 = 320.;
  
 diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
-index a68de55..c126c6b 100644
+index 3e5eae6..7cff383 100644
 --- a/app/src/settings_view/warp_agent_page.rs
 +++ b/app/src/settings_view/warp_agent_page.rs
 @@ -35,9 +35,10 @@ use warp_errors::report_if_error;
@@ -476,7 +476,7 @@ index a68de55..c126c6b 100644
                      });
                  }
                  ctx.notify();
-@@ -7075,7 +7083,8 @@ impl HostApiKeyWidget {
+@@ -7076,7 +7084,8 @@ impl HostApiKeyWidget {
              let appearance = Appearance::handle(ctx).as_ref(ctx);
              let options = SingleLineEditorOptions {
                  is_password: true,
@@ -486,7 +486,7 @@ index a68de55..c126c6b 100644
                  text: TextOptions {
                      font_size_override: Some(appearance.ui_font_size()),
                      font_family_override: Some(appearance.monospace_font_family()),
-@@ -7216,14 +7225,22 @@ fn render_host_setting_column(
+@@ -7217,14 +7226,22 @@ fn render_host_setting_column(
      let column = Flex::column()
          .with_spacing(8.)
          .with_child(
@@ -515,7 +515,7 @@ index a68de55..c126c6b 100644
          )
          .with_child(control)
          .finish();
-@@ -7247,7 +7264,10 @@ impl HostAiModelWidget {
+@@ -7248,7 +7265,10 @@ impl HostAiModelWidget {
          let settings = HostAiSettings::as_ref(ctx);
          let (text, placeholder) = match kind {
              HostAiModelKind::Fast => (settings.fast_model.clone(), "deepseek/deepseek-v4.1-flash"),
@@ -527,7 +527,7 @@ index a68de55..c126c6b 100644
          };
          let editor = host_settings_editor(&text, placeholder, ctx);
          ctx.subscribe_to_view(&editor, move |_, editor, event, ctx| {
-@@ -7260,7 +7280,9 @@ impl HostAiModelWidget {
+@@ -7261,7 +7281,9 @@ impl HostAiModelWidget {
                  editor.update(ctx, |editor, ctx| editor.set_buffer_text(&model, ctx));
              }
              HostAiSettings::handle(ctx).update(ctx, |settings, ctx| match kind {
@@ -538,7 +538,7 @@ index a68de55..c126c6b 100644
                  HostAiModelKind::Expanded => {
                      report_if_error!(settings.expanded_model.set_value(model, ctx))
                  }
-@@ -7282,7 +7304,12 @@ impl SettingsWidget for HostAiModelWidget {
+@@ -7283,7 +7305,12 @@ impl SettingsWidget for HostAiModelWidget {
          }
      }
  
@@ -552,7 +552,7 @@ index a68de55..c126c6b 100644
          let (label, description) = match self.kind {
              HostAiModelKind::Fast => (
                  "Fast model",
-@@ -7298,7 +7325,12 @@ impl SettingsWidget for HostAiModelWidget {
+@@ -7299,7 +7326,12 @@ impl SettingsWidget for HostAiModelWidget {
              .ui_builder()
              .text_input(self.editor.clone())
              .with_style(UiComponentStyles {
@@ -566,7 +566,7 @@ index a68de55..c126c6b 100644
                  background: Some(appearance.theme().surface_2().into()),
                  ..Default::default()
              })
-@@ -7352,10 +7384,16 @@ fn render_host_ai_priority_option(
+@@ -7353,10 +7385,16 @@ fn render_host_ai_priority_option(
  ) -> Option<RenderableOptionConfig> {
      let theme = Appearance::as_ref(app).theme();
      let (label, tooltip) = match priority {
@@ -585,7 +585,7 @@ index a68de55..c126c6b 100644
      };
      Some(RenderableOptionConfig {
          icon_path: "",
-@@ -7376,7 +7414,11 @@ fn render_host_ai_priority_option(
+@@ -7377,7 +7415,11 @@ fn render_host_ai_priority_option(
              background_color: theme.surface_3().into(),
              border_color: theme.outline().into(),
          }),
@@ -598,7 +598,7 @@ index a68de55..c126c6b 100644
      })
  }
  
-@@ -7410,7 +7452,12 @@ impl SettingsWidget for HostAiPriorityWidget {
+@@ -7411,7 +7453,12 @@ impl SettingsWidget for HostAiPriorityWidget {
          }
      }
  
@@ -612,7 +612,7 @@ index a68de55..c126c6b 100644
          let label = match self.kind {
              HostAiModelKind::Fast => "Fast model priority",
              HostAiModelKind::Expanded => "Expanded model priority",
-@@ -7454,7 +7501,8 @@ impl HostAiEffortWidget {
+@@ -7455,7 +7502,8 @@ impl HostAiEffortWidget {
                      .collect(),
                  ctx,
              );
@@ -622,7 +622,7 @@ index a68de55..c126c6b 100644
              dropdown
          });
          Self { dropdown }
-@@ -7468,7 +7516,12 @@ impl SettingsWidget for HostAiEffortWidget {
+@@ -7469,7 +7517,12 @@ impl SettingsWidget for HostAiEffortWidget {
          "ai provider openrouter expanded model reasoning effort thinking command search #"
      }
  
@@ -636,7 +636,7 @@ index a68de55..c126c6b 100644
          host_setting_row(render_dropdown_item(
              appearance,
              "Expanded model effort",
-@@ -7499,7 +7552,12 @@ impl SettingsWidget for HostAiPrivateRoutingWidget {
+@@ -7500,7 +7553,12 @@ impl SettingsWidget for HostAiPrivateRoutingWidget {
          "ai provider openrouter private routing privacy zero data retention zdr training"
      }
  
@@ -650,7 +650,7 @@ index a68de55..c126c6b 100644
          let toggle = render_ai_setting_toggle::<HostAiPrivateRouting>(
              "Private routing",
              WarpAgentPageAction::ToggleHostAiPrivateRouting,
-@@ -7540,7 +7598,12 @@ impl SettingsWidget for HostAiNextCommandWidget {
+@@ -7541,7 +7599,12 @@ impl SettingsWidget for HostAiNextCommandWidget {
          "ai a.i. next command suggestions autosuggestions privacy"
      }
  
@@ -664,7 +664,7 @@ index a68de55..c126c6b 100644
          let settings = HostAiSettings::as_ref(app);
          let private_routing = *settings.private_routing;
          let toggle = render_ai_setting_toggle::<HostAiNextCommand>(
-@@ -7586,7 +7649,12 @@ impl SettingsWidget for HostAiPromptSuggestionsWidget {
+@@ -7587,7 +7650,12 @@ impl SettingsWidget for HostAiPromptSuggestionsWidget {
          "ai a.i. prompt suggestions cli coding agent claude code privacy"
      }
  
@@ -678,7 +678,7 @@ index a68de55..c126c6b 100644
          let settings = HostAiSettings::as_ref(app);
          let private_routing = *settings.private_routing;
          let toggle = render_ai_setting_toggle::<HostAiPromptSuggestions>(
-@@ -7684,7 +7752,12 @@ impl SettingsWidget for HostAiLocalWidget {
+@@ -7685,7 +7753,12 @@ impl SettingsWidget for HostAiLocalWidget {
          }
      }
  
@@ -692,7 +692,7 @@ index a68de55..c126c6b 100644
          let (label, description) = match self.kind {
              HostAiLocalKind::Model => (
                  "Local model",
-@@ -7701,7 +7774,12 @@ impl SettingsWidget for HostAiLocalWidget {
+@@ -7702,7 +7775,12 @@ impl SettingsWidget for HostAiLocalWidget {
              .ui_builder()
              .text_input(self.editor.clone())
              .with_style(UiComponentStyles {
@@ -706,7 +706,7 @@ index a68de55..c126c6b 100644
                  background: Some(appearance.theme().surface_2().into()),
                  ..Default::default()
              })
-@@ -7749,12 +7827,22 @@ impl SettingsWidget for HostAiPromptSuggestionsAgentWidget {
+@@ -7750,12 +7828,22 @@ impl SettingsWidget for HostAiPromptSuggestionsAgentWidget {
          *settings.prompt_suggestions && *settings.private_routing
      }
  
@@ -731,7 +731,7 @@ index a68de55..c126c6b 100644
                  background: Some(appearance.theme().surface_2().into()),
                  ..Default::default()
              })
-@@ -7791,14 +7879,19 @@ impl HostAiRecentCommandsWidget {
+@@ -7792,14 +7880,19 @@ impl HostAiRecentCommandsWidget {
                      .into_iter()
                      .map(|count| {
                          DropdownItem::new(
@@ -753,7 +753,7 @@ index a68de55..c126c6b 100644
              dropdown
          });
          Self { dropdown }
-@@ -7812,7 +7905,12 @@ impl SettingsWidget for HostAiRecentCommandsWidget {
+@@ -7813,7 +7906,12 @@ impl SettingsWidget for HostAiRecentCommandsWidget {
          "ai provider recent commands history context command search # privacy"
      }
  
@@ -768,10 +768,10 @@ index a68de55..c126c6b 100644
          host_setting_row(render_dropdown_item(
              appearance,
 diff --git a/app/src/terminal/cli_agent_sessions/mod.rs b/app/src/terminal/cli_agent_sessions/mod.rs
-index 756da0a..7b44cf7 100644
+index f743355..df6e328 100644
 --- a/app/src/terminal/cli_agent_sessions/mod.rs
 +++ b/app/src/terminal/cli_agent_sessions/mod.rs
-@@ -384,6 +384,11 @@ impl CLIAgentSessionsModel {
+@@ -424,6 +424,11 @@ impl CLIAgentSessionsModel {
          self.sessions.get(&terminal_view_id)
      }
  
@@ -784,10 +784,10 @@ index 756da0a..7b44cf7 100644
      pub fn is_input_open(&self, terminal_view_id: EntityId) -> bool {
          self.sessions
 diff --git a/app/src/terminal/input.rs b/app/src/terminal/input.rs
-index 1181c5a..67306fd 100644
+index 09b73ab..f95bbf1 100644
 --- a/app/src/terminal/input.rs
 +++ b/app/src/terminal/input.rs
-@@ -7502,7 +7502,8 @@ impl Input {
+@@ -7506,7 +7506,8 @@ impl Input {
  
          // Now handle the default (empty prefix) placeholder
          if toggled_on && AISettings::as_ref(ctx).is_ai_command_search_enabled(ctx) {
@@ -797,7 +797,7 @@ index 1181c5a..67306fd 100644
                  // agent_mode_hint_text now handles caching internally
                  let hint_text = self.agent_mode_hint_text(ctx);
                  self.editor.update(ctx, |editor, ctx| {
-@@ -12921,7 +12922,6 @@ impl Input {
+@@ -12948,7 +12949,6 @@ impl Input {
              futures::future::ready(None).boxed()
          };
  
@@ -806,10 +806,10 @@ index 1181c5a..67306fd 100644
              .spawn_abortable(
                  async move {
 diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
-index 0622f21..28aa4e8 100644
+index 2ec4c61..bfab760 100644
 --- a/app/src/terminal/remote_tty/event_loop.rs
 +++ b/app/src/terminal/remote_tty/event_loop.rs
-@@ -10,20 +10,25 @@ use futures_util::SinkExt;
+@@ -10,21 +10,26 @@ use futures_util::SinkExt;
  use parking_lot::FairMutex;
  use serde::{Deserialize, Serialize};
  use settings::Setting as _;
@@ -825,6 +825,7 @@ index 0622f21..28aa4e8 100644
  
 +use crate::settings::SshSettings;
  use crate::terminal::bootstrap::init_shell_script_for_shell;
+ use crate::terminal::event::ObservedExitStatus;
  use crate::terminal::event_listener::ChannelEventListener;
  use crate::terminal::model::ansi::Processor;
  use crate::terminal::model::session::SessionId;
@@ -837,7 +838,7 @@ index 0622f21..28aa4e8 100644
  use crate::terminal::writeable_pty::Message as EventLoopMessage;
  use crate::terminal::{SizeInfo, TerminalModel};
  
-@@ -174,12 +179,35 @@ impl SshWrapperEnv {
+@@ -175,12 +180,35 @@ impl SshWrapperEnv {
          [
              ("WARP_IS_LOCAL_SHELL_SESSION", "1"),
              ("WARP_USE_SSH_WRAPPER", flag(self.enabled)),
@@ -874,7 +875,7 @@ index 0622f21..28aa4e8 100644
  pub(super) enum EventLoopEvent {
      /// The PTY host saw what looks like a password prompt in the running command.
      PossiblePasswordPrompt,
-@@ -229,9 +257,15 @@ impl EventLoop {
+@@ -230,9 +258,15 @@ impl EventLoop {
          size_info: SizeInfo,
          ctx: &mut ModelContext<Self>,
      ) -> Self {
@@ -892,18 +893,22 @@ index 0622f21..28aa4e8 100644
          let response = WebSocket::connect(url, None /* protocols */);
  
          ctx.spawn(response, Self::on_ws_connection);
-@@ -495,7 +529,9 @@ impl EventLoop {
+@@ -498,9 +532,11 @@ impl EventLoop {
                  log::info!("Remote shell exited with code {code}");
                  self.shell_exited = true;
                  // As on desktop: the pane closes (or shows the exit banner) once its shell ends.
--                self.terminal_model.lock().exit(ExitReason::ShellProcessExited);
+-                self.terminal_model.lock().exit(ExitReason::ShellProcessExited {
+-                    status: ObservedExitStatus::Code(code),
+-                });
 +                self.terminal_model
 +                    .lock()
-+                    .exit(ExitReason::ShellProcessExited);
++                    .exit(ExitReason::ShellProcessExited {
++                        status: ObservedExitStatus::Code(code),
++                    });
              }
              Ok(HostControl::PasswordPrompt) => ctx.emit(EventLoopEvent::PossiblePasswordPrompt),
              Err(_) => report_error!("Received unknown text message from the PTY host"),
-@@ -542,7 +578,7 @@ impl EventLoop {
+@@ -547,7 +583,7 @@ impl EventLoop {
      /// (MAX_CANON on macOS) and drops the rest; the init line is longer. fish, which takes a
      /// moment to start, lost it.
      async fn wait_until_shell_reads_input(shell_output: &Receiver<()>) {
@@ -912,7 +917,7 @@ index 0622f21..28aa4e8 100644
          let first = shell_output.recv();
          futures_util::pin_mut!(first);
          if let Either::Right(_) = select(first, Timer::after(SHELL_START_TIMEOUT)).await {
-@@ -580,7 +616,9 @@ impl EventLoop {
+@@ -585,7 +621,9 @@ impl EventLoop {
              // every chunk typed (quadratic; over 15 s), so fish reads it from the terminal
              // without the editor instead: raw mode for exact bytes, then the old mode back.
              ShellType::Fish => {
@@ -923,7 +928,7 @@ index 0622f21..28aa4e8 100644
                  format!(
                      " eval '{script}'; set -l __warp_tty (command stty -g); command stty raw -echo; \
                       command head -c {len} | source; command stty $__warp_tty; set -e __warp_tty"
-@@ -617,7 +655,12 @@ impl EventLoop {
+@@ -622,7 +660,12 @@ impl EventLoop {
          // The host's shell runs on the user's machine, so it's a local session like a desktop
          // Warp shell: these make the bootstrap wrap `ssh` and Warpify the remote shell, as the
          // desktop PTY's environment does (local_tty/unix.rs).
@@ -1100,10 +1105,10 @@ index 7e5fed1..575dd3d 100644
          .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
          .with_border(Border::all(1.0).with_border_fill(theme.outline()));
 diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
-index 1300991..151d80e 100644
+index bb3285e..7971282 100644
 --- a/app/src/workspace/view.rs
 +++ b/app/src/workspace/view.rs
-@@ -6794,6 +6794,14 @@ impl Workspace {
+@@ -6796,6 +6796,14 @@ impl Workspace {
                      ctx,
                  );
              }
@@ -1322,10 +1327,10 @@ index 60d3e03..dc3b3b8 100644
          );
  
 diff --git a/app/src/workspaces/user_workspaces/mod.rs b/app/src/workspaces/user_workspaces/mod.rs
-index 11fca44..95c4451 100644
+index de57f77..d4886be 100644
 --- a/app/src/workspaces/user_workspaces/mod.rs
 +++ b/app/src/workspaces/user_workspaces/mod.rs
-@@ -1690,7 +1690,11 @@ impl UserWorkspaces {
+@@ -1694,7 +1694,11 @@ impl UserWorkspaces {
      /// Updates whether or not session sharing is enabled based on the current team's tier policy.
      fn update_session_sharing_enablement(&self, ctx: &AppContext) {
          // Embedded builds have no session sharing (it needs a Warp account); see `features.rs`.

@@ -1,7 +1,7 @@
-From 367b17adcaf82477ab59fd98fcdd5be8251e3f77 Mon Sep 17 00:00:00 2001
+From e67ed5dde3dd8deb8e3d2ffcbb437f5bd69ea76d Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 15:28:06 -0700
-Subject: [PATCH 43/74] Queue Enter while an in-band command holds the shell,
+Subject: [PATCH 43/73] Queue Enter while an in-band command holds the shell,
  in all its phases
 
 The queue only covered an active in-band block. Enter right after typing
@@ -17,10 +17,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 24 insertions(+), 8 deletions(-)
 
 diff --git a/app/src/terminal/input.rs b/app/src/terminal/input.rs
-index 78a8b2d..1181c5a 100644
+index 459def1..09b73ab 100644
 --- a/app/src/terminal/input.rs
 +++ b/app/src/terminal/input.rs
-@@ -7810,13 +7810,13 @@ impl Input {
+@@ -7836,13 +7836,13 @@ impl Input {
          command: &str,
          ctx: &mut ViewContext<Self>,
      ) -> bool {
@@ -38,10 +38,10 @@ index 78a8b2d..1181c5a 100644
 +                CanExecuteCommand::No(reason) if reason.is_existing_active_command()
 +            );
 +            if !blocked_by_user_command {
-                 self.has_pending_command = true;
+                 self.pending_command = Some(PendingCommand::InputBuffer);
                  self.editor.update(ctx, |editor, ctx| {
                      editor.set_interaction_state(InteractionState::Selectable, ctx);
-@@ -7828,6 +7828,19 @@ impl Input {
+@@ -7854,6 +7854,19 @@ impl Input {
          self.try_execute_command(command, ctx)
      }
  
@@ -61,8 +61,8 @@ index 78a8b2d..1181c5a 100644
      /// Retries a command queued by [`Self::try_execute_or_queue_buffer_command`] until the shell
      /// is free. Gives up after a few seconds and makes the buffer editable again, so the input
      /// never stays locked.
-@@ -7840,7 +7853,10 @@ impl Input {
-                 if !input.has_pending_command {
+@@ -7866,7 +7879,10 @@ impl Input {
+                 if !input.has_pending_command() {
                      return;
                  }
 -                input.execute_pending_command(ctx);
@@ -70,6 +70,6 @@ index 78a8b2d..1181c5a 100644
 +                if !input.is_shell_held_by_in_band_command() || attempt + 1 >= MAX_ATTEMPTS {
 +                    input.execute_pending_command(ctx);
 +                }
-                 if !input.has_pending_command {
+                 if !input.has_pending_command() {
                      return;
                  }

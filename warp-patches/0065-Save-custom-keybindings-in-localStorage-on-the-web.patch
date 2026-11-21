@@ -1,7 +1,7 @@
-From 3aecb7a051d16e9a7d732a8cedf2384344f8cb49 Mon Sep 17 00:00:00 2001
+From 6c81b8e962465e16af6e38d3bdf744da45a7fa84 Mon Sep 17 00:00:00 2001
 From: Alex Brodsky <122503996+Albro3459@users.noreply.github.com>
 Date: Fri, 6 Nov 2026 12:23:13 -0600
-Subject: [PATCH 65/74] Save custom keybindings in localStorage on the web
+Subject: [PATCH 65/73] Save custom keybindings in localStorage on the web
 
 The web build never saved keybindings: save_custom_keybindings only
 logged "TODO(wasm)", and the read side opened keybindings.yaml from a

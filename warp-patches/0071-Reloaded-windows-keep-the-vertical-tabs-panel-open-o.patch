@@ -1,7 +1,7 @@
-From 40aea1dcc1b43eed7e1c354e4c2a8188227ed6e3 Mon Sep 17 00:00:00 2001
+From ef45fc530770ac54f52a7435c6de98da8bb87839 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 18 Nov 2026 11:57:20 +0100
-Subject: [PATCH 72/74] Reloaded windows keep the vertical tabs panel open or
+Subject: [PATCH 71/73] Reloaded windows keep the vertical tabs panel open or
  closed in embedded builds
 
 Embedded builds opened the panel in every restored window, so reloading a VS Code window reopened a panel the user had closed. New windows still open it (nothing to restore), and a reloaded window keeps the state it saved. The Appearance setting can still open it in restored windows.

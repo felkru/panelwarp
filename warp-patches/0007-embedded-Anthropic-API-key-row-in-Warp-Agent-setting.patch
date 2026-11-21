@@ -1,7 +1,7 @@
-From 6773c83764672ccd653ddbef31fe299f7a9059ea Mon Sep 17 00:00:00 2001
+From ea98427dee1f38a7b46b83da088084570a399ba6 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 13:45:57 -0700
-Subject: [PATCH 07/74] embedded: Anthropic API key row in Warp Agent settings
+Subject: [PATCH 07/73] embedded: Anthropic API key row in Warp Agent settings
 
 The key is handed straight to the host app (window.warpPanelStoreApiKey) and never kept in
 Warp. Deep link: warp://settings?widget=host_api_key. The '#' trigger toggle is enabled whenever
@@ -42,7 +42,7 @@ index 9a299bc..cf613c7 100644
  /// build keeps settings in localStorage rather than a file. Returns false if the host doesn't
  /// provide `window.warpPanelOpenSettingsFile`.
 diff --git a/app/src/settings_view/mod.rs b/app/src/settings_view/mod.rs
-index b9a19aa..2dcdfc1 100644
+index 18632a9..97433f4 100644
 --- a/app/src/settings_view/mod.rs
 +++ b/app/src/settings_view/mod.rs
 @@ -462,6 +462,10 @@ pub fn settings_widget_deeplink_target(slug: &str) -> Option<(SettingsSection, &
@@ -57,7 +57,7 @@ index b9a19aa..2dcdfc1 100644
          "cli_agents" => Some((
              SettingsSection::ThirdPartyCLIAgents,
 diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
-index d36f30e..6cb8023 100644
+index 5e09a6f..a5b7655 100644
 --- a/app/src/settings_view/warp_agent_page.rs
 +++ b/app/src/settings_view/warp_agent_page.rs
 @@ -2289,6 +2289,14 @@ impl WarpAgentPageView {
@@ -90,7 +90,7 @@ index d36f30e..6cb8023 100644
              self.toggle.clone(),
              &view.local_only_icon_tooltip_states,
              app,
-@@ -6818,6 +6826,119 @@ pub(crate) fn custom_model_routers_widget_id() -> &'static str {
+@@ -6819,6 +6827,119 @@ pub(crate) fn custom_model_routers_widget_id() -> &'static str {
      CustomModelRoutersWidget::static_widget_id()
  }
  

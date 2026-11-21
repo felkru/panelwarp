@@ -1,7 +1,7 @@
-From 37a5d1e87bd89074cfd1686d3e05668e10db4e53 Mon Sep 17 00:00:00 2001
+From bca071f93be02f48a1de80ea9cacaf974e69c3f2 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Mon, 12 Oct 2026 16:18:52 -0700
-Subject: [PATCH 59/74] Agents panel: summaries behind an info button instead
+Subject: [PATCH 59/73] Agents panel: summaries behind an info button instead
  of on hover
 
 The AI summary popover opened whenever the pointer rested on a row and

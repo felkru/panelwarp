@@ -1,7 +1,7 @@
-From 327095b6cc519a6285a0162599e69ec1ad0bf9b0 Mon Sep 17 00:00:00 2001
+From 9e82614daf886cc0c06486ce30a6e72d3803c437 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Sun, 11 Oct 2026 11:04:07 -0700
-Subject: [PATCH 54/74] Agents panel: status icons and agents running in Warp's
+Subject: [PATCH 54/73] Agents panel: status icons and agents running in Warp's
  panes
 
 Rows show the agent's icon with the vertical tabs' status badge (in progress, done, needs

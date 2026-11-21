@@ -1,7 +1,7 @@
-From 3df6258ff7e4ad4d14329ccaf352116252091aaa Mon Sep 17 00:00:00 2001
+From 512ff773614c84b5f53037764b94b764bdaf8849 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Sat, 10 Oct 2026 01:01:05 -0700
-Subject: [PATCH 50/74] Close a tab when its shell exits in embedded builds
+Subject: [PATCH 50/73] Close a tab when its shell exits in embedded builds
 
 The web event loop now ends the terminal model when the PTY host reports the shell exited, as
 desktop does for a local shell, so `exit` closes the pane. The embedded app has no window to
@@ -9,15 +9,19 @@ close, so when the last tab's shell exits a new tab takes its place.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- app/src/terminal/remote_tty/event_loop.rs |  3 +++
+ app/src/terminal/remote_tty/event_loop.rs |  6 ++++++
  app/src/workspace/view.rs                 | 17 +++++++++++++++++
- 2 files changed, 20 insertions(+)
+ 2 files changed, 23 insertions(+)
 
 diff --git a/app/src/terminal/remote_tty/event_loop.rs b/app/src/terminal/remote_tty/event_loop.rs
-index a10c501..0622f21 100644
+index 80b493d..2ec4c61 100644
 --- a/app/src/terminal/remote_tty/event_loop.rs
 +++ b/app/src/terminal/remote_tty/event_loop.rs
-@@ -19,6 +19,7 @@ use crate::terminal::bootstrap::init_shell_script_for_shell;
+@@ -16,9 +16,11 @@ use warpui::{Entity, ModelContext, SingletonEntity};
+ use websocket::{Message, Sink, Stream, WebSocket, WebsocketMessage as _};
+ 
+ use crate::terminal::bootstrap::init_shell_script_for_shell;
++use crate::terminal::event::ObservedExitStatus;
  use crate::terminal::event_listener::ChannelEventListener;
  use crate::terminal::model::ansi::Processor;
  use crate::terminal::model::session::SessionId;
@@ -25,20 +29,22 @@ index a10c501..0622f21 100644
  use crate::settings::SshSettings;
  use crate::terminal::session_settings::SessionSettings;
  use crate::terminal::warpify::settings::WarpifySettings;
-@@ -493,6 +494,8 @@ impl EventLoop {
+@@ -495,6 +497,10 @@ impl EventLoop {
              Ok(HostControl::Exited(code)) => {
                  log::info!("Remote shell exited with code {code}");
                  self.shell_exited = true;
 +                // As on desktop: the pane closes (or shows the exit banner) once its shell ends.
-+                self.terminal_model.lock().exit(ExitReason::ShellProcessExited);
++                self.terminal_model.lock().exit(ExitReason::ShellProcessExited {
++                    status: ObservedExitStatus::Code(code),
++                });
              }
              Ok(HostControl::PasswordPrompt) => ctx.emit(EventLoopEvent::PossiblePasswordPrompt),
              Err(_) => report_error!("Received unknown text message from the PTY host"),
 diff --git a/app/src/workspace/view.rs b/app/src/workspace/view.rs
-index 67c138e..1300991 100644
+index 8f33e26..bb3285e 100644
 --- a/app/src/workspace/view.rs
 +++ b/app/src/workspace/view.rs
-@@ -16296,6 +16296,23 @@ impl Workspace {
+@@ -16365,6 +16365,23 @@ impl Workspace {
                  }
              }
              pane_group::Event::Exited { add_to_undo_stack } => {

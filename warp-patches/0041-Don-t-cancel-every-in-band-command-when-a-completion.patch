@@ -1,7 +1,7 @@
-From fe471ebe157627d0b6b411c279166e2851a99d71 Mon Sep 17 00:00:00 2001
+From fcdc7a456cfe4bc5478f3fc41ed01aeb0a2a3414 Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Thu, 8 Oct 2026 15:13:44 -0700
-Subject: [PATCH 41/74] Don't cancel every in-band command when a completion is
+Subject: [PATCH 41/73] Don't cancel every in-band command when a completion is
  aborted
 
 Aborting a stale completion, autosuggestion or decoration future already
@@ -18,10 +18,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  3 files changed, 17 insertions(+), 32 deletions(-)
 
 diff --git a/app/src/terminal/input.rs b/app/src/terminal/input.rs
-index 8db11ec..78a8b2d 100644
+index a1ae856..459def1 100644
 --- a/app/src/terminal/input.rs
 +++ b/app/src/terminal/input.rs
-@@ -10249,9 +10249,6 @@ impl Input {
+@@ -10276,9 +10276,6 @@ impl Input {
          }
  
          let completion_context = completer_data.completion_session_context(ctx);
@@ -31,7 +31,7 @@ index 8db11ec..78a8b2d 100644
  
          let reverse_chronological_potential_autosuggestions =
              NextCommandModel::get_reverse_chronological_potential_autosuggestions(
-@@ -10415,11 +10412,7 @@ impl Input {
+@@ -10442,11 +10439,7 @@ impl Input {
                      }
                  },
                  Self::on_autosuggestion_result,
@@ -44,7 +44,7 @@ index 8db11ec..78a8b2d 100644
              )
              .abort_handle();
  
-@@ -12830,7 +12823,6 @@ impl Input {
+@@ -12857,7 +12850,6 @@ impl Input {
          }
  
          if comp_sources == CompletionSources::WarpThenNative {
@@ -52,7 +52,7 @@ index 8db11ec..78a8b2d 100644
              let abort_handle = ctx
                  .spawn_abortable(
                      async move {
-@@ -12890,9 +12882,7 @@ impl Input {
+@@ -12917,9 +12909,7 @@ impl Input {
                              );
                          }
                      },
@@ -63,7 +63,7 @@ index 8db11ec..78a8b2d 100644
                  )
                  .abort_handle();
              self.completions_abort_handle = Some(abort_handle);
-@@ -12915,7 +12905,6 @@ impl Input {
+@@ -12942,7 +12932,6 @@ impl Input {
              futures::future::ready(None).boxed()
          };
  
@@ -71,7 +71,7 @@ index 8db11ec..78a8b2d 100644
  
          let abort_handle = ctx
              .spawn_abortable(
-@@ -12990,9 +12979,7 @@ impl Input {
+@@ -13017,9 +13006,7 @@ impl Input {
                          ctx,
                      )
                  },
@@ -82,7 +82,7 @@ index 8db11ec..78a8b2d 100644
              )
              .abort_handle();
  
-@@ -13027,7 +13014,6 @@ impl Input {
+@@ -13054,7 +13041,6 @@ impl Input {
              buffer_text: buffer_text[0..cursor_position].to_owned(),
              results_tx,
          });
@@ -90,7 +90,7 @@ index 8db11ec..78a8b2d 100644
  
          let abort_handle = ctx
              .spawn_abortable(
-@@ -13068,9 +13054,7 @@ impl Input {
+@@ -13095,9 +13081,7 @@ impl Input {
                          ctx,
                      );
                  },
@@ -144,10 +144,10 @@ index fda5440..d5d2671 100644
      /// using the result of the last parse operation.
      fn apply_decorations(&mut self, ctx: &mut ViewContext<Self>) {
 diff --git a/app/src/terminal/view.rs b/app/src/terminal/view.rs
-index fcf879d..78182bf 100644
+index 4a315d1..e99f7cb 100644
 --- a/app/src/terminal/view.rs
 +++ b/app/src/terminal/view.rs
-@@ -417,7 +417,6 @@ use crate::terminal::event::{
+@@ -420,7 +420,6 @@ use crate::terminal::event::{
  use crate::terminal::find::{BlockGridMatch, BlockListMatch, TerminalFindModel};
  use crate::terminal::general_settings::GeneralSettings;
  use crate::terminal::grid_size_util::grid_cell_dimensions;
@@ -155,7 +155,7 @@ index fcf879d..78182bf 100644
  use crate::terminal::input::inline_menu::InlineMenuPositioner;
  #[cfg(not(target_family = "wasm"))]
  use crate::terminal::input::slash_commands::fork_button_action;
-@@ -14267,12 +14266,7 @@ impl TerminalView {
+@@ -14584,12 +14583,7 @@ impl TerminalView {
          ctx.spawn(
              async move { session.load_external_commands().await },
              move |me, _, ctx| {

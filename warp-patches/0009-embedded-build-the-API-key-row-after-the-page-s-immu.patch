@@ -1,7 +1,7 @@
-From c6f6fa577ee66859b839dc2b594f91d2162825c3 Mon Sep 17 00:00:00 2001
+From ea77cb85be64e64d7a16cdc7099984368783c83c Mon Sep 17 00:00:00 2001
 From: Felix Krueckel <hi@felkru.com>
 Date: Wed, 7 Oct 2026 13:46:41 -0700
-Subject: [PATCH 09/74] embedded: build the API key row after the page's
+Subject: [PATCH 09/73] embedded: build the API key row after the page's
  immutable settings borrow
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -10,7 +10,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 9 insertions(+), 8 deletions(-)
 
 diff --git a/app/src/settings_view/warp_agent_page.rs b/app/src/settings_view/warp_agent_page.rs
-index 6cb8023..62ecc3a 100644
+index a5b7655..ea3da9d 100644
 --- a/app/src/settings_view/warp_agent_page.rs
 +++ b/app/src/settings_view/warp_agent_page.rs
 @@ -2289,14 +2289,6 @@ impl WarpAgentPageView {
